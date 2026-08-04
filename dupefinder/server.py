@@ -8,6 +8,7 @@ import sys
 import threading
 import traceback
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -39,10 +40,38 @@ class Job:
     error: str | None = None
     config: dict = field(default_factory=dict)  # {a, b, rules}
     trash_dirs: list[NoisyDir] = field(default_factory=list)  # internal: resolved at scan time
+    applying: bool = False  # an apply is running right now
+    applied: bool = False  # an apply already completed; never run a second one
 
 
 JOBS: dict[str, Job] = {}
 JOBS_LOCK = threading.Lock()
+
+
+class Busy(Exception):
+    """Raised when an identical operation is already running.
+
+    A user double-clicking a button must not start the same expensive walk
+    twice, so the handler refuses the duplicate rather than racing it.
+    """
+
+
+_INFLIGHT: set[str] = set()
+_INFLIGHT_LOCK = threading.Lock()
+
+
+@contextmanager
+def _single_flight(key: str):
+    """Allow only one in-flight operation per key. Raises Busy on a duplicate."""
+    with _INFLIGHT_LOCK:
+        if key in _INFLIGHT:
+            raise Busy("that operation is already running; wait for it to finish")
+        _INFLIGHT.add(key)
+    try:
+        yield
+    finally:
+        with _INFLIGHT_LOCK:
+            _INFLIGHT.discard(key)
 
 
 # --------------------------------------------------------------------------
@@ -163,7 +192,10 @@ def handle_prescan(body: dict) -> tuple[int, dict]:
     except ValueError as exc:
         return 400, {"error": str(exc)}
 
-    noisy = find_noisy_dirs(a, "A") + find_noisy_dirs(b, "B")
+    # Walking both trees is expensive; refuse a duplicate rather than race it.
+    with _single_flight(f"prescan:{a}|{b}"):
+        noisy = find_noisy_dirs(a, "A") + find_noisy_dirs(b, "B")
+
     return 200, {"noisy": [asdict(n) for n in noisy]}
 
 
@@ -177,10 +209,18 @@ def handle_scan(body: dict) -> tuple[int, dict]:
     except ValueError as exc:
         return 400, {"error": str(exc)}
 
-    job_id = uuid.uuid4().hex
-    job = Job(id=job_id, config={"a": a, "b": b, "rules": rules})
+    config = {"a": a, "b": b, "rules": rules}
+
     with JOBS_LOCK:
-        JOBS[job_id] = job
+        # A repeated click must not spawn a second scanning thread over the same
+        # tree. An identical request already in flight returns that same job, so
+        # the caller simply keeps polling the scan that is already running.
+        for existing in JOBS.values():
+            if existing.status == "running" and existing.config == config:
+                return 200, {"job_id": existing.id}
+
+        job_id = uuid.uuid4().hex
+        JOBS[job_id] = Job(id=job_id, config=config)
 
     thread = threading.Thread(target=_run_scan_job, args=(job_id, a, b, rules), daemon=True)
     thread.start()
@@ -245,22 +285,45 @@ def handle_apply(body: dict) -> tuple[int, dict]:
             return 400, {"error": f"cannot move a file with status '{row.status}': {row_id}"}
         entries.append((row.abs_path, row.rel_path))
 
-    os.makedirs(dest, exist_ok=True)
+    # Moving files is destructive and not idempotent: the second run of the same
+    # apply would find its sources already gone. Claim the job atomically so a
+    # double-click can never start a second pass over the same selection.
+    with JOBS_LOCK:
+        if job.applied:
+            return 409, {
+                "error": "this scan has already been applied; run a new scan to move more files"
+            }
+        if job.applying:
+            return 409, {"error": "these files are already being moved; wait for it to finish"}
+        job.applying = True
 
-    cache = HashCache()
-    move_result = apply_moves(entries, dest, cache)
-    move_result.trashed = move_to_trash(job.trash_dirs, dest)
+    try:
+        os.makedirs(dest, exist_ok=True)
 
-    payload = {
-        "config": job.config,
-        "stats": asdict(job.report.stats),
-        "moved": move_result.moved,
-        "skipped_identical": move_result.skipped_identical,
-        "renamed": move_result.renamed,
-        "trashed": move_result.trashed,
-        "errors": move_result.errors,
-    }
-    report_path = write_report(dest, payload)
+        cache = HashCache()
+        move_result = apply_moves(entries, dest, cache)
+
+        # One directory at a time, so a single failure (a folder locked by
+        # Windows, say) is reported without discarding the ones that succeeded.
+        for noisy_dir in job.trash_dirs:
+            try:
+                move_result.trashed.extend(move_to_trash([noisy_dir], dest))
+            except (OSError, ValueError) as exc:
+                move_result.errors.append({"path": noisy_dir.abs_path, "error": str(exc)})
+
+        payload = {
+            "config": job.config,
+            "stats": asdict(job.report.stats),
+            "moved": move_result.moved,
+            "skipped_identical": move_result.skipped_identical,
+            "renamed": move_result.renamed,
+            "trashed": move_result.trashed,
+            "errors": move_result.errors,
+        }
+        report_path = write_report(dest, payload)
+        job.applied = True
+    finally:
+        job.applying = False
 
     return 200, {
         "moved": move_result.moved,
@@ -325,6 +388,8 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             status, payload = handler(body)
+        except Busy as exc:
+            status, payload = 409, {"error": str(exc)}
         except Exception as exc:  # never leak a raw traceback to the client
             print(f"unhandled error in {parsed.path}: {exc}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)

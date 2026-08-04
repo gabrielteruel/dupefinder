@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-08-04
+
+### Fixed
+
+- Buttons that trigger a request are now disabled for the whole duration of that request,
+  including the scan's progress polling. Clicking Continue repeatedly no longer fires several
+  overlapping pre-scans.
+- `POST /api/apply` can only run once per scan. A concurrent or repeated call is rejected with
+  409 instead of attempting to move the same files twice.
+- `POST /api/scan` returns the job already running when the request is identical, rather than
+  spawning a second scanning thread over the same tree.
+- `POST /api/prescan` refuses a duplicate request while an identical one is still walking.
+- A directory that cannot be moved to `_trash/` is now recorded as an error instead of raising
+  a 500, and no longer discards the directories that were trashed successfully.
+- Folder-browse requests no longer stack up when clicking quickly through directories, which
+  could render a folder other than the one last clicked.
+
 ## [0.2.0] - 2026-08-04
 
 ### Added

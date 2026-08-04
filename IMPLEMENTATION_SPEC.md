@@ -388,6 +388,22 @@ Every response is JSON with `Content-Type: application/json`. Errors return the 
 status code and `{"error": "<english message>"}`. Never leak a raw traceback to the client;
 log it to stderr instead.
 
+### Concurrency
+
+The UI disables a button for the duration of its request, but the server must not rely on
+that -- a double-click, a stale tab or a retry can always produce overlapping calls.
+
+- `_single_flight(key)` is a context manager that admits one operation per key and raises
+  `Busy` on a duplicate; `do_POST` maps `Busy` to **409**. `/api/prescan` uses it, keyed by
+  `a|b`, because walking both trees is expensive.
+- `/api/scan` is idempotent: under `JOBS_LOCK` it returns the id of a still-running job whose
+  `config` is identical, instead of starting a second scanning thread. A differing `rules`
+  dict counts as a different request and starts a new job.
+- `/api/apply` carries `Job.applying` and `Job.applied`, both claimed atomically under
+  `JOBS_LOCK` before any file is touched. Moving is destructive and not idempotent, so a
+  second apply is refused with **409** -- while in progress and permanently afterwards.
+  `applying` is cleared in a `finally` block so a failed apply can be retried.
+
 ### API contracts
 
 **`POST /api/browse`** — powers the server-side folder picker. Browsers cannot expose

@@ -19,6 +19,8 @@ const state = {
   sortDir: "asc",
   filterText: "",
   statusFilters: new Set(["exclusive", "internal_copy", "unreadable"]),
+  busy: false, // a request-driven action is running
+  browseBusy: false, // a folder-browse request is running
 };
 
 const pathInputs = {
@@ -86,6 +88,35 @@ function showScreen(id) {
   document.getElementById(id).classList.add("active");
 }
 
+/**
+ * Run an action that talks to the server, with the button disabled throughout.
+ *
+ * Guards against the impatient double-click: the button is disabled before the
+ * first await, and a global flag blocks any other action from starting in
+ * parallel. The button is restored in `finally` so a failed request never
+ * leaves the UI stuck.
+ */
+async function runAction(button, label, fn) {
+  if (state.busy) return;
+  state.busy = true;
+
+  const originalText = button ? button.textContent : null;
+  if (button) {
+    button.disabled = true;
+    button.textContent = label;
+  }
+
+  try {
+    await fn();
+  } finally {
+    state.busy = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------
 // Screen 1: folder selection
 // ---------------------------------------------------------------------
@@ -102,29 +133,33 @@ Object.entries(pathInputs).forEach(([key, input]) => {
   });
 });
 
-document.getElementById("btn-continue-select").addEventListener("click", async () => {
-  const errorEl = document.getElementById("select-error");
-  errorEl.hidden = true;
-  try {
-    const data = await api("/api/prescan", "POST", { a: state.paths.a, b: state.paths.b });
-    state.noisy = data.noisy;
-    state.rules = {};
-    showScreen("screen-prescan");
+const btnContinueSelect = document.getElementById("btn-continue-select");
 
-    const hasNoisy = state.noisy.length > 0;
-    document.getElementById("prescan-controls").hidden = !hasNoisy;
-    document.querySelector("#screen-prescan .table-wrap").hidden = !hasNoisy;
-    document.getElementById("btn-start-scan").hidden = !hasNoisy;
+btnContinueSelect.addEventListener("click", () => {
+  runAction(btnContinueSelect, "Scanning folders…", async () => {
+    const errorEl = document.getElementById("select-error");
+    errorEl.hidden = true;
+    try {
+      const data = await api("/api/prescan", "POST", { a: state.paths.a, b: state.paths.b });
+      state.noisy = data.noisy;
+      state.rules = {};
+      showScreen("screen-prescan");
 
-    if (hasNoisy) {
-      renderPrescanTable();
-    } else {
-      startScan();
+      const hasNoisy = state.noisy.length > 0;
+      document.getElementById("prescan-controls").hidden = !hasNoisy;
+      document.querySelector("#screen-prescan .table-wrap").hidden = !hasNoisy;
+      document.getElementById("btn-start-scan").hidden = !hasNoisy;
+
+      if (hasNoisy) {
+        renderPrescanTable();
+      } else {
+        await startScan();
+      }
+    } catch (err) {
+      errorEl.hidden = false;
+      errorEl.textContent = err.message;
     }
-  } catch (err) {
-    errorEl.hidden = false;
-    errorEl.textContent = err.message;
-  }
+  });
 });
 
 // ---------------------------------------------------------------------
@@ -142,6 +177,11 @@ function openBrowse(target) {
 }
 
 async function browseTo(path) {
+  // Clicking through directories quickly must not stack up requests whose
+  // responses could then arrive out of order and render the wrong folder.
+  if (state.browseBusy) return;
+  state.browseBusy = true;
+
   const errorEl = document.getElementById("browse-error");
   errorEl.hidden = true;
   try {
@@ -153,6 +193,8 @@ async function browseTo(path) {
   } catch (err) {
     errorEl.hidden = false;
     errorEl.textContent = err.message;
+  } finally {
+    state.browseBusy = false;
   }
 }
 
@@ -240,12 +282,15 @@ document.getElementById("btn-set-all").addEventListener("click", () => {
   });
 });
 
-document.getElementById("btn-start-scan").addEventListener("click", startScan);
+const btnStartScan = document.getElementById("btn-start-scan");
+
+btnStartScan.addEventListener("click", () => {
+  runAction(btnStartScan, "Scanning…", startScan);
+});
 
 async function startScan() {
   const errorEl = document.getElementById("prescan-error");
   errorEl.hidden = true;
-  document.getElementById("btn-start-scan").disabled = true;
   document.getElementById("scan-progress").hidden = false;
 
   try {
@@ -255,11 +300,11 @@ async function startScan() {
       rules: state.rules,
     });
     state.jobId = data.job_id;
-    pollProgress();
+    // Awaited so the caller stays "busy" for the whole scan, not just the POST.
+    await pollProgress();
   } catch (err) {
     errorEl.hidden = false;
     errorEl.textContent = err.message;
-    document.getElementById("btn-start-scan").disabled = false;
     document.getElementById("scan-progress").hidden = true;
   }
 }
@@ -279,39 +324,52 @@ function phaseLabel(phase, processed, total) {
   }
 }
 
+/** Poll until the scan finishes. Resolves once the report is loaded or it fails. */
 function pollProgress() {
   const label = document.getElementById("scan-progress-label");
   const fill = document.getElementById("scan-progress-fill");
   const errorEl = document.getElementById("prescan-error");
 
-  const interval = setInterval(async () => {
-    try {
-      const data = await api(`/api/progress?job=${encodeURIComponent(state.jobId)}`, "GET");
-      label.textContent = phaseLabel(data.phase, data.processed, data.total);
+  return new Promise((resolve) => {
+    // A single in-flight poll at a time: a slow response must not pile up
+    // requests behind it.
+    let polling = false;
 
-      if (data.total > 0) {
-        fill.classList.remove("indeterminate");
-        fill.style.width = `${Math.min(100, Math.round((data.processed / data.total) * 100))}%`;
-      } else {
-        fill.classList.add("indeterminate");
-      }
+    const interval = setInterval(async () => {
+      if (polling) return;
+      polling = true;
 
-      if (data.status === "done") {
-        clearInterval(interval);
-        await loadReport();
-      } else if (data.status === "error") {
+      try {
+        const data = await api(`/api/progress?job=${encodeURIComponent(state.jobId)}`, "GET");
+        label.textContent = phaseLabel(data.phase, data.processed, data.total);
+
+        if (data.total > 0) {
+          fill.classList.remove("indeterminate");
+          fill.style.width = `${Math.min(100, Math.round((data.processed / data.total) * 100))}%`;
+        } else {
+          fill.classList.add("indeterminate");
+        }
+
+        if (data.status === "done") {
+          clearInterval(interval);
+          await loadReport();
+          resolve();
+        } else if (data.status === "error") {
+          clearInterval(interval);
+          errorEl.hidden = false;
+          errorEl.textContent = data.error || "scan failed";
+          resolve();
+        }
+      } catch (err) {
         clearInterval(interval);
         errorEl.hidden = false;
-        errorEl.textContent = data.error || "scan failed";
-        document.getElementById("btn-start-scan").disabled = false;
+        errorEl.textContent = err.message;
+        resolve();
+      } finally {
+        polling = false;
       }
-    } catch (err) {
-      clearInterval(interval);
-      errorEl.hidden = false;
-      errorEl.textContent = err.message;
-      document.getElementById("btn-start-scan").disabled = false;
-    }
-  }, 400);
+    }, 400);
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -455,7 +513,9 @@ document.getElementById("btn-select-none").addEventListener("click", () => {
   renderReportTable();
 });
 
-document.getElementById("btn-apply").addEventListener("click", async () => {
+const btnApply = document.getElementById("btn-apply");
+
+btnApply.addEventListener("click", () => {
   const selectedRows = state.rows.filter((r) => state.selected.has(r.id));
   if (selectedRows.length === 0) {
     alert("Select at least one file to move.");
@@ -469,17 +529,19 @@ document.getElementById("btn-apply").addEventListener("click", async () => {
   );
   if (!confirmed) return;
 
-  try {
-    const result = await api("/api/apply", "POST", {
-      job_id: state.jobId,
-      dest: state.paths.dest,
-      selected: selectedRows.map((r) => r.id),
-    });
-    renderResult(result);
-    showScreen("screen-result");
-  } catch (err) {
-    alert(`Failed to move files: ${err.message}`);
-  }
+  runAction(btnApply, "Moving files…", async () => {
+    try {
+      const result = await api("/api/apply", "POST", {
+        job_id: state.jobId,
+        dest: state.paths.dest,
+        selected: selectedRows.map((r) => r.id),
+      });
+      renderResult(result);
+      showScreen("screen-result");
+    } catch (err) {
+      alert(`Failed to move files: ${err.message}`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------
