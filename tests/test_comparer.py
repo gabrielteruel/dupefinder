@@ -4,8 +4,9 @@ import os
 import unittest
 
 from dupefinder.comparer import compare
-from dupefinder.hashing import HashCache
-from dupefinder.models import FileEntry
+from dupefinder.hashing import HashCache, PersistentHashCache
+from dupefinder.models import FileEntry, ScanProgress
+from dupefinder.store import Store
 from tests.helpers import TempTreeCase, build_tree
 
 
@@ -167,6 +168,114 @@ class ComparerTests(TempTreeCase):
         self.assertEqual(report.errors[0].path, unreadable_path)
         # The other file is still classified normally.
         self.assertIn(rows["a/readable.bin"].status, {"exclusive", "internal_copy"})
+
+
+class IoWorkersEquivalenceTests(TempTreeCase):
+    def _build_scenario_tree(self):
+        build_tree(
+            self.root,
+            {
+                "a/old_report.pdf": b"same content",
+                "b/new_report.pdf": b"same content",
+                "a/same-name.txt": b"P content here",
+                "b/same-name.txt": b"Q different content",
+                "a/file.bin": b"AAAA",
+                "b/file.bin": b"BBBB",
+                "a/empty1.txt": b"",
+                "a/empty2.txt": b"",
+                "b/empty3.txt": b"",
+                "a/copy1.bin": b"identical content",
+                "a/nested/copy2.bin": b"identical content",
+                "a/z_copy3.bin": b"identical content",
+                "a/unique.bin": b"nothing else shares this size!",
+            },
+        )
+        entries_a = _entries(
+            self.root,
+            [
+                "a/old_report.pdf", "a/same-name.txt", "a/file.bin", "a/empty1.txt",
+                "a/empty2.txt", "a/copy1.bin", "a/nested/copy2.bin", "a/z_copy3.bin", "a/unique.bin",
+            ],
+        )
+        entries_b = _entries(
+            self.root, ["b/new_report.pdf", "b/same-name.txt", "b/file.bin", "b/empty3.txt"]
+        )
+        return entries_a, entries_b
+
+    def _signature(self, report):
+        return [
+            (r.rel_path, r.status, r.sha256, r.duplicate_of)
+            for r in sorted(report.rows, key=lambda r: r.rel_path)
+        ]
+
+    def test_io_workers_four_matches_io_workers_one_on_every_scenario(self) -> None:
+        entries_a, entries_b = self._build_scenario_tree()
+
+        sequential = compare(entries_a, entries_b, HashCache(), io_workers=1)
+        parallel = compare(entries_a, entries_b, HashCache(), io_workers=4)
+
+        self.assertEqual(self._signature(sequential), self._signature(parallel))
+        self.assertEqual(len(sequential.errors), len(parallel.errors))
+
+    def test_warm_persistent_cache_matches_a_cold_cache(self) -> None:
+        entries_a, entries_b = self._build_scenario_tree()
+        db_path = os.path.join(self.root, "hashes.db")
+
+        store = Store(db_path)
+        warm_cache = PersistentHashCache(store)
+        compare(entries_a, entries_b, warm_cache)  # populate the cache
+        warm_cache.close()
+
+        store2 = Store(db_path)
+        resumed_cache = PersistentHashCache(store2)
+        warm = compare(entries_a, entries_b, resumed_cache)
+        resumed_cache.close()
+
+        cold = compare(entries_a, entries_b, HashCache())
+
+        self.assertEqual(self._signature(warm), self._signature(cold))
+
+
+class BytesProgressTests(TempTreeCase):
+    def test_bytes_to_resolve_excludes_fast_path_and_bytes_resolved_reaches_it(self) -> None:
+        build_tree(
+            self.root,
+            {"a/unique.bin": b"x" * 999, "a/dup.bin": b"y" * 50, "b/dup.bin": b"y" * 50},
+        )
+        entries_a = _entries(self.root, ["a/unique.bin", "a/dup.bin"])
+        entries_b = _entries(self.root, ["b/dup.bin"])
+        snapshots: list[ScanProgress] = []
+
+        compare(entries_a, entries_b, HashCache(), progress=snapshots.append)
+
+        last = snapshots[-1]
+        self.assertEqual(last.bytes_to_resolve, 50 + 50)  # the 999-byte fast-path file excluded
+        self.assertEqual(last.bytes_resolved, last.bytes_to_resolve)
+
+    def test_bytes_resolved_reaches_completion_with_a_fully_warm_cache(self) -> None:
+        # Pins the bug the spec calls out: HashCache.bytes_read stays at 0 on
+        # an all-cache-hit run, so bytes_resolved must be tracked from
+        # FileEntry.size, or a resumed scan would look like it made no
+        # progress at all.
+        build_tree(self.root, {"a/dup.bin": b"y" * 50, "b/dup.bin": b"y" * 50})
+        entries_a = _entries(self.root, ["a/dup.bin"])
+        entries_b = _entries(self.root, ["b/dup.bin"])
+        db_path = os.path.join(self.root, "hashes.db")
+
+        store = Store(db_path)
+        warm_up = PersistentHashCache(store)
+        compare(entries_a, entries_b, warm_up)
+        warm_up.close()
+
+        store2 = Store(db_path)
+        resumed = PersistentHashCache(store2)
+        snapshots: list[ScanProgress] = []
+        compare(entries_a, entries_b, resumed, progress=snapshots.append)
+        resumed.close()
+
+        self.assertEqual(resumed.bytes_read, 0)
+        self.assertEqual(snapshots[-1].bytes_resolved, snapshots[-1].bytes_to_resolve)
+        self.assertGreater(snapshots[-1].bytes_to_resolve, 0)
 
 
 if __name__ == "__main__":
