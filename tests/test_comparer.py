@@ -2,8 +2,9 @@
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
-from dupefinder.comparer import compare
+from dupefinder.comparer import _hash_many, compare
 from dupefinder.hashing import HashCache, PersistentHashCache
 from dupefinder.models import FileEntry, ScanProgress
 from dupefinder.store import Store
@@ -276,6 +277,32 @@ class BytesProgressTests(TempTreeCase):
         self.assertEqual(resumed.bytes_read, 0)
         self.assertEqual(snapshots[-1].bytes_resolved, snapshots[-1].bytes_to_resolve)
         self.assertGreater(snapshots[-1].bytes_to_resolve, 0)
+
+
+class HashManyGeneratorInputTests(unittest.TestCase):
+    def test_generator_input_under_threading_does_not_silently_drop_items(self) -> None:
+        # Regression test: the threaded branch of _hash_many used to iterate
+        # `items` twice -- once via executor.map, once via zip. Executor.map
+        # eagerly drains its input, so a lazy iterable (e.g. a generator, as
+        # opposed to the lists both real call sites happen to pass today)
+        # would already be exhausted by the time zip ran over it, and zip
+        # would then silently yield zero pairs. Every file in that bucket
+        # would vanish from the results with no exception and no error
+        # logged. _hash_many now materializes `items` into a list as its
+        # first statement, so this must produce every entry even when a
+        # generator is passed in and an executor is active.
+        entries = [
+            FileEntry(abs_path=f"/fake/path{i}", rel_path=f"path{i}", size=i)
+            for i in range(5)
+        ]
+        items = ((entry, "a") for entry in entries)  # a generator, not a list
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(_hash_many(items, lambda path: path, executor))
+
+        self.assertEqual(len(results), 5)
+        result_rel_paths = {entry.rel_path for entry, _origin, _result in results}
+        self.assertEqual(result_rel_paths, {entry.rel_path for entry in entries})
 
 
 if __name__ == "__main__":

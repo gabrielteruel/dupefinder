@@ -183,7 +183,11 @@ def compare(
     return Report(rows=rows, errors=errors, stats=stats)
 
 
-def _hash_many(items, hash_fn: Callable[[str], str], executor: ThreadPoolExecutor | None):
+def _hash_many(
+    items: list[tuple[FileEntry, str]],
+    hash_fn: Callable[[str], str],
+    executor: ThreadPoolExecutor | None,
+):
     """Yield (entry, origin, result) for every (entry, origin) in `items`.
 
     `result` is either the digest string or the caught ReadError. Sequential
@@ -191,7 +195,17 @@ def _hash_many(items, hash_fn: Callable[[str], str], executor: ThreadPoolExecuto
     regression risk. With an executor, `Executor.map` preserves input order in
     its results, so accounting and classification never depend on which
     thread finishes first -- only wall-clock time changes.
+
+    `items` is materialized into a list up front because the threaded branch
+    below iterates it twice (once for `executor.map`, once for `zip`).
+    `Executor.map` eagerly drains its input, so a lazy iterable would be fully
+    consumed by the first pass and `zip` would then see it exhausted, silently
+    yielding zero pairs -- every file in the bucket would vanish with no
+    exception. Both current call sites already pass concrete lists, so this is
+    a structural guard against a future caller passing something lazy, not a
+    live bug.
     """
+    items = list(items)
     if executor is None:
         for entry, origin in items:
             try:
