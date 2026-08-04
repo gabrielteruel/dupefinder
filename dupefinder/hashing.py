@@ -131,20 +131,12 @@ class PersistentHashCache(HashCache):
         if row is not None and row.partial is not None:
             with self._lock:
                 self._partial[path] = row.partial
-                self.partial_calls += 1
                 self.cache_hits += 1
             return row.partial
 
         digest = partial_hash(path)
         self._store.put_hash(
-            HashRow(
-                path=path,
-                size=st.st_size,
-                mtime_ns=st.st_mtime_ns,
-                partial=digest,
-                sampled=row.sampled if row is not None else None,
-                full=row.full if row is not None else None,
-            )
+            HashRow(path=path, size=st.st_size, mtime_ns=st.st_mtime_ns, partial=digest)
         )
         with self._lock:
             self._partial[path] = digest
@@ -168,20 +160,12 @@ class PersistentHashCache(HashCache):
         if row is not None and row.full is not None:
             with self._lock:
                 self._full[path] = row.full
-                self.full_calls += 1
                 self.cache_hits += 1
             return row.full
 
         digest = full_hash(path)
         self._store.put_hash(
-            HashRow(
-                path=path,
-                size=st.st_size,
-                mtime_ns=st.st_mtime_ns,
-                partial=row.partial if row is not None else None,
-                sampled=row.sampled if row is not None else None,
-                full=digest,
-            )
+            HashRow(path=path, size=st.st_size, mtime_ns=st.st_mtime_ns, full=digest)
         )
         with self._lock:
             self._full[path] = digest

@@ -118,6 +118,46 @@ class SchemaVersionTests(TempTreeCase):
             store.close()
 
 
+class SiblingDigestMergeTests(TempTreeCase):
+    def test_partial_then_full_for_same_version_without_an_intervening_flush_are_both_kept(
+        self,
+    ) -> None:
+        # Two calls computing different digests for the same file version must
+        # not lose each other's work, whether the loss would happen in the
+        # in-memory pending buffer (put_hash) or in the upsert SQL (flush).
+        db_path = os.path.join(self.root, "hashes.db")
+        store = Store(db_path)
+        try:
+            store.put_hash(HashRow(path="/a/b.txt", size=5, mtime_ns=100, partial="p1"))
+            store.put_hash(HashRow(path="/a/b.txt", size=5, mtime_ns=100, full="f1"))
+            store.flush()
+            row = store.get_hash("/a/b.txt", size=5, mtime_ns=100)
+            self.assertIsNotNone(row)
+            self.assertEqual(row.partial, "p1")
+            self.assertEqual(row.full, "f1")
+        finally:
+            store.close()
+
+    def test_a_new_file_version_does_not_inherit_the_old_versions_digests(self) -> None:
+        # A different size/mtime_ns means genuinely different bytes -- the old
+        # digests must not be carried forward into the new version's row.
+        db_path = os.path.join(self.root, "hashes.db")
+        store = Store(db_path)
+        try:
+            store.put_hash(
+                HashRow(path="/a/b.txt", size=5, mtime_ns=100, partial="p_old", full="f_old")
+            )
+            store.flush()
+            store.put_hash(HashRow(path="/a/b.txt", size=9, mtime_ns=200, partial="p_new"))
+            store.flush()
+            row = store.get_hash("/a/b.txt", size=9, mtime_ns=200)
+            self.assertIsNotNone(row)
+            self.assertEqual(row.partial, "p_new")
+            self.assertIsNone(row.full)
+        finally:
+            store.close()
+
+
 class SettingsTests(TempTreeCase):
     def test_settings_round_trip_including_non_ascii_paths(self) -> None:
         db_path = os.path.join(self.root, "hashes.db")

@@ -120,10 +120,29 @@ class Store:
         return row
 
     def put_hash(self, row: HashRow) -> None:
-        """Queue a row for write; flushes automatically at the configured thresholds."""
+        """Queue a row for write; flushes automatically at the configured thresholds.
+
+        If a row is already pending for this path AND it's the same file version
+        (size and mtime_ns both match), merge sibling digest fields instead of
+        overwriting -- two calls computing different digests for the same file
+        (e.g. partial() then full()) must not lose each other's work before a
+        flush even happens. A genuinely new file version (different size or
+        mtime_ns) replaces the pending row outright; its digests belong to
+        different bytes and must never be carried forward.
+        """
         if self._disabled:
             return
         with self._lock:
+            existing = self._pending.get(row.path)
+            if existing is not None and existing.size == row.size and existing.mtime_ns == row.mtime_ns:
+                row = HashRow(
+                    path=row.path,
+                    size=row.size,
+                    mtime_ns=row.mtime_ns,
+                    partial=row.partial if row.partial is not None else existing.partial,
+                    sampled=row.sampled if row.sampled is not None else existing.sampled,
+                    full=row.full if row.full is not None else existing.full,
+                )
             self._pending[row.path] = row
             due = (
                 len(self._pending) >= self._flush_rows
@@ -150,10 +169,25 @@ class Store:
                     "INSERT INTO file_hashes "
                     "(path, size, mtime_ns, partial, sampled, full, last_seen) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(path) DO UPDATE SET size=excluded.size, "
-                    "mtime_ns=excluded.mtime_ns, partial=excluded.partial, "
-                    "sampled=excluded.sampled, full=excluded.full, "
-                    "last_seen=excluded.last_seen",
+                    "ON CONFLICT(path) DO UPDATE SET "
+                    "size = excluded.size, "
+                    "mtime_ns = excluded.mtime_ns, "
+                    "partial = CASE "
+                    "    WHEN file_hashes.size = excluded.size AND file_hashes.mtime_ns = excluded.mtime_ns "
+                    "    THEN COALESCE(excluded.partial, file_hashes.partial) "
+                    "    ELSE excluded.partial "
+                    "END, "
+                    "sampled = CASE "
+                    "    WHEN file_hashes.size = excluded.size AND file_hashes.mtime_ns = excluded.mtime_ns "
+                    "    THEN COALESCE(excluded.sampled, file_hashes.sampled) "
+                    "    ELSE excluded.sampled "
+                    "END, "
+                    "full = CASE "
+                    "    WHEN file_hashes.size = excluded.size AND file_hashes.mtime_ns = excluded.mtime_ns "
+                    "    THEN COALESCE(excluded.full, file_hashes.full) "
+                    "    ELSE excluded.full "
+                    "END, "
+                    "last_seen = excluded.last_seen",
                     [
                         (r.path, r.size, r.mtime_ns, r.partial, r.sampled, r.full, now)
                         for r in rows

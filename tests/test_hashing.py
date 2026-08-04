@@ -108,6 +108,10 @@ class PersistentHashCacheTests(TempTreeCase):
         self.assertEqual(digest, "precomputed")
         self.assertEqual(cache.cache_hits, 1)
         self.assertEqual(cache.cache_misses, 0)
+        # A store hit must not count as a computed hash -- comparer.py feeds
+        # full_calls straight into the report's "N full hashes" stat, and a
+        # store hit did no hashing this run.
+        self.assertEqual(cache.full_calls, 0)
         cache.close()
 
     def test_a_miss_computes_and_persists_for_the_next_run(self) -> None:
@@ -119,6 +123,8 @@ class PersistentHashCacheTests(TempTreeCase):
         cache = PersistentHashCache(store)
         digest = cache.full(path)
         self.assertEqual(cache.cache_misses, 1)
+        # A miss actually computed a digest this run -- full_calls must count it.
+        self.assertEqual(cache.full_calls, 1)
         cache.close()  # flush -- the resumability guarantee
 
         reopened_store = Store(db_path)
@@ -129,6 +135,8 @@ class PersistentHashCacheTests(TempTreeCase):
             second = reopened_cache.full(path)
         self.assertEqual(second, digest)
         self.assertEqual(reopened_cache.cache_hits, 1)
+        # The hit on the reopened cache must not be counted as a computed hash.
+        self.assertEqual(reopened_cache.full_calls, 0)
         reopened_cache.close()
 
 
