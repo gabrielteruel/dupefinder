@@ -18,7 +18,16 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Internal working specs, written to be handed to an implementing model.
+# Internal working documents, written to be handed to an implementing model.
 # They contain machine-specific details and describe work that may not exist
-# yet, so they stay local. Durable design rationale lives in docs/design.md.
+# yet, so they stay local and are deleted once the work lands.
+#
+# Nothing durable may live only here. Design rationale belongs in
+# docs/design.md, user-facing behaviour in README.md, and changes in
+# CHANGELOG.md -- all three are tracked. A rule or decision that exists only
+# in an ignored file is one `rm` away from being lost with no history.
 *_SPEC.md
+docs/superpowers/
+
+# Subagent-driven-development workspace: ledger, task briefs, review packages.
+.superpowers/
