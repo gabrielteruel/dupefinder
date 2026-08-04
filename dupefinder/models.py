@@ -67,3 +67,19 @@ class Report:
     rows: list[ReportRow] = field(default_factory=list)
     errors: list[ScanError] = field(default_factory=list)
     stats: Stats = field(default_factory=Stats)
+
+
+@dataclass
+class ScanProgress:
+    """A snapshot of comparison progress, driven by bytes rather than buckets.
+
+    A bucket holding three photos and one holding three 2 GB videos count the
+    same as bucket counts but differ by orders of magnitude in cost, so the
+    UI's ETA is driven by bytes_resolved / bytes_to_resolve instead.
+    """
+
+    buckets_done: int
+    buckets_total: int
+    bytes_resolved: int      # bytes whose hash is now known (disk or cache)
+    bytes_to_resolve: int    # upper bound, computed once after bucketing
+    current_path: str        # for the UI, so a slow scan doesn't look frozen

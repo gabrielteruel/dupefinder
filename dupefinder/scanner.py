@@ -1,6 +1,8 @@
 """Directory walking: file discovery and noisy-directory detection."""
 
 import os
+import time
+from collections.abc import Callable
 
 from dupefinder.models import FileEntry, NoisyDir, ScanError
 
@@ -102,15 +104,25 @@ def _count_recursive(root: str, limit: int = COUNT_LIMIT) -> tuple[int, int, boo
     return file_count, total_bytes, False
 
 
-def scan(root: str, skip_abs_paths: set[str]) -> tuple[list[FileEntry], list[ScanError]]:
+def scan(
+    root: str,
+    skip_abs_paths: set[str],
+    progress: Callable[[int, str], None] | None = None,
+) -> tuple[list[FileEntry], list[ScanError]]:
     """Walk `root` and return every file as a FileEntry, sorted by rel_path.
 
     Directories whose absolute path is in `skip_abs_paths` are pruned. Symlinks
     (files or directories) are never followed or reported. A file that fails
     os.stat() produces a ScanError and is omitted from the returned entries.
+
+    `progress`, if given, is called as `progress(files_found, current_path)`,
+    throttled to at most once every 0.2s plus a guaranteed final call, so a
+    caller can show live discovery progress without a Python call per file on
+    a million-file tree.
     """
     entries: list[FileEntry] = []
     errors: list[ScanError] = []
+    last_progress_at = time.monotonic()
 
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = [
@@ -132,5 +144,13 @@ def scan(root: str, skip_abs_paths: set[str]) -> tuple[list[FileEntry], list[Sca
             rel_path = os.path.relpath(abs_path, root).replace(os.sep, "/")
             entries.append(FileEntry(abs_path=abs_path, rel_path=rel_path, size=size))
 
+            if progress is not None:
+                now = time.monotonic()
+                if now - last_progress_at >= 0.2:
+                    progress(len(entries), abs_path)
+                    last_progress_at = now
+
     entries.sort(key=lambda e: e.rel_path)
+    if progress is not None:
+        progress(len(entries), "")
     return entries, errors
