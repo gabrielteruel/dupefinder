@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>dupefinder — content-based folder comparison</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>dupefinder</h1>
+    <p class="app-subtitle">Find files in Folder A that don't exist in Folder B — by content, not by name.</p>
+  </header>
+
+  <main class="app-main">
+
+    <!-- SCREEN 1: folder selection -->
+    <section id="screen-select" class="screen active">
+      <h2>1. Choose folders</h2>
+
+      <div class="field-row">
+        <label for="input-a">Folder A <span class="hint">(scanned for files to move)</span></label>
+        <div class="path-input">
+          <input type="text" id="input-a" placeholder="/path/to/folder-a" autocomplete="off" />
+          <button type="button" class="btn btn-secondary" data-browse-target="a">Browse…</button>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <label for="input-b">Folder B <span class="hint">(never modified)</span></label>
+        <div class="path-input">
+          <input type="text" id="input-b" placeholder="/path/to/folder-b" autocomplete="off" />
+          <button type="button" class="btn btn-secondary" data-browse-target="b">Browse…</button>
+        </div>
+      </div>
+
+      <div class="field-row">
+        <label for="input-dest">Destination <span class="hint">(where exclusive files will be moved)</span></label>
+        <div class="path-input">
+          <input type="text" id="input-dest" placeholder="/path/to/destination" autocomplete="off" />
+          <button type="button" class="btn btn-secondary" data-browse-target="dest">Browse…</button>
+        </div>
+      </div>
+
+      <p id="select-error" class="error-text" hidden></p>
+
+      <div class="actions">
+        <button type="button" id="btn-continue-select" class="btn btn-primary" disabled>Continue</button>
+      </div>
+    </section>
+
+    <!-- SCREEN 2: noisy-directory pre-scan + progress -->
+    <section id="screen-prescan" class="screen">
+      <h2>2. Review folders to skip</h2>
+      <p class="screen-hint">
+        These directories look like version control, dependencies, caches or system folders.
+        Choose what to do with each one. Folder B can never be moved to trash — it is never modified.
+      </p>
+
+      <div id="prescan-controls" class="prescan-controls">
+        <label for="set-all-select">Set all to:</label>
+        <select id="set-all-select">
+          <option value="compare">Compare</option>
+          <option value="skip" selected>Skip</option>
+          <option value="trash">Move to trash (folder A only)</option>
+        </select>
+        <button type="button" id="btn-set-all" class="btn btn-secondary">Apply to all rows</button>
+      </div>
+
+      <div class="table-wrap">
+        <table id="prescan-table" class="data-table">
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Root</th>
+              <th>Files</th>
+              <th>Size</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="prescan-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="actions">
+        <button type="button" id="btn-start-scan" class="btn btn-primary">Start scan</button>
+      </div>
+
+      <div id="scan-progress" class="progress-panel" hidden>
+        <p id="scan-progress-label">Scanning…</p>
+        <div class="progress-bar">
+          <div id="scan-progress-fill" class="progress-bar-fill indeterminate"></div>
+        </div>
+      </div>
+
+      <p id="prescan-error" class="error-text" hidden></p>
+    </section>
+
+    <!-- SCREEN 3: report -->
+    <section id="screen-report" class="screen">
+      <h2>3. Review and select files to move</h2>
+
+      <div class="report-toolbar">
+        <input type="text" id="report-filter" placeholder="Filter by path…" />
+        <label class="status-filter"><input type="checkbox" data-status-filter="exclusive" checked /> Exclusive to A</label>
+        <label class="status-filter"><input type="checkbox" data-status-filter="internal_copy" checked /> Internal copy</label>
+        <label class="status-filter"><input type="checkbox" data-status-filter="unreadable" checked /> Unreadable</label>
+        <button type="button" id="btn-select-all" class="btn btn-secondary">Select all</button>
+        <button type="button" id="btn-select-none" class="btn btn-secondary">Select none</button>
+      </div>
+
+      <p id="report-summary" class="screen-hint"></p>
+
+      <div class="table-wrap">
+        <table id="report-table" class="data-table">
+          <thead>
+            <tr>
+              <th class="col-check"></th>
+              <th class="sortable" data-sort-key="rel_path">Path</th>
+              <th class="sortable" data-sort-key="size">Size</th>
+              <th class="sortable" data-sort-key="status">Status</th>
+            </tr>
+          </thead>
+          <tbody id="report-tbody"></tbody>
+        </table>
+      </div>
+
+      <details id="errors-panel" class="errors-panel" hidden>
+        <summary id="errors-summary">Read errors</summary>
+        <ul id="errors-list"></ul>
+      </details>
+
+      <div class="actions">
+        <span id="selection-summary" class="selection-summary">0 files selected, 0 B</span>
+        <button type="button" id="btn-apply" class="btn btn-primary">Move selected files</button>
+      </div>
+    </section>
+
+    <!-- SCREEN 4: result -->
+    <section id="screen-result" class="screen">
+      <h2>4. Done</h2>
+      <ul id="result-summary" class="result-summary"></ul>
+      <p id="result-report-path" class="report-path"></p>
+      <div class="actions">
+        <button type="button" id="btn-start-over" class="btn btn-primary">Start over</button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Folder browse modal -->
+  <div id="browse-modal" class="modal-backdrop" hidden>
+    <div class="modal">
+      <h3>Choose a folder</h3>
+      <p id="browse-current-path" class="browse-current-path"></p>
+      <p id="browse-error" class="error-text" hidden></p>
+      <ul id="browse-list" class="browse-list"></ul>
+      <div class="modal-actions">
+        <button type="button" id="btn-browse-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="btn-browse-select" class="btn btn-primary">Select this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

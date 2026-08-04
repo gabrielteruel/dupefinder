@@ -1,0 +1,403 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-border: #2a2f3a;
+  --text: #e6e9ef;
+  --text-dim: #9aa3b2;
+  --accent: #4f8cff;
+  --accent-dim: #2b3a5c;
+  --danger: #ff6b6b;
+  --success: #4fd18b;
+  --warn: #f2b84b;
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.app-header {
+  padding: 24px 32px 8px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.app-subtitle {
+  color: var(--text-dim);
+  margin: 4px 0 0;
+}
+
+.app-main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px 32px 64px;
+}
+
+.screen {
+  display: none;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-top: 16px;
+}
+
+.screen.active {
+  display: block;
+}
+
+h2 {
+  margin-top: 0;
+}
+
+.screen-hint {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.field-row {
+  margin-bottom: 16px;
+}
+
+.field-row label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.field-row .hint {
+  font-weight: 400;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.path-input {
+  display: flex;
+  gap: 8px;
+}
+
+input[type="text"] {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 0.95rem;
+}
+
+input[type="text"]:focus,
+select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+select {
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 8px 10px;
+}
+
+.btn {
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-secondary {
+  background: transparent;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.error-text {
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  margin-top: 12px;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.data-table th,
+.data-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--panel-border);
+  white-space: nowrap;
+}
+
+.data-table th {
+  background: rgba(255, 255, 255, 0.03);
+  position: sticky;
+  top: 0;
+}
+
+.data-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.data-table th.sortable:hover {
+  color: var(--accent);
+}
+
+.data-table td.path-cell {
+  white-space: normal;
+  word-break: break-all;
+}
+
+.col-check {
+  width: 32px;
+}
+
+.prescan-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.radio-group {
+  display: flex;
+  gap: 12px;
+}
+
+.radio-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.progress-panel {
+  margin-top: 20px;
+}
+
+.progress-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--panel-border);
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.2s ease;
+}
+
+.progress-bar-fill.indeterminate {
+  width: 40%;
+  animation: indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+.report-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.report-toolbar input[type="text"] {
+  max-width: 260px;
+}
+
+.status-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.status-badge.status-exclusive {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.status-badge.status-internal_copy {
+  background: rgba(242, 184, 75, 0.15);
+  color: var(--warn);
+}
+
+.status-badge.status-unreadable {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--danger);
+}
+
+.duplicate-note {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+
+.errors-panel {
+  margin-top: 16px;
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
+.errors-panel ul {
+  color: var(--text-dim);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.selection-summary {
+  margin-right: auto;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.result-summary {
+  list-style: none;
+  padding: 0;
+  font-size: 1rem;
+}
+
+.result-summary li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.report-path {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: min(560px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal h3 {
+  margin-top: 0;
+}
+
+.browse-current-path {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.browse-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  flex: 1;
+}
+
+.browse-list li {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.browse-list li:last-child {
+  border-bottom: none;
+}
+
+.browse-list li:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
