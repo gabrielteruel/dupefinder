@@ -6,7 +6,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
-from dupefinder.hashing import CHUNK_SIZE, HashCache, ReadError, full_hash, partial_hash
+from dupefinder.hashing import CHUNK_SIZE, HashCache, PersistentHashCache, ReadError, full_hash, partial_hash
+from dupefinder.store import HashRow, Store
 from tests.helpers import TempTreeCase, build_tree
 
 
@@ -81,6 +82,54 @@ class ReadErrorTests(TempTreeCase):
             full_hash(directory_path)
 
         self.assertEqual(ctx.exception.path, directory_path)
+
+
+class PersistentHashCacheTests(TempTreeCase):
+    def test_serves_a_stored_digest_without_recomputing(self) -> None:
+        build_tree(self.root, {"file.bin": b"content"})
+        path = os.path.join(self.root, "file.bin")
+        st = os.stat(path)
+
+        db_path = os.path.join(self.root, "hashes.db")
+        store = Store(db_path)
+        store.put_hash(
+            HashRow(
+                path=path, size=st.st_size, mtime_ns=st.st_mtime_ns, partial=None, full="precomputed"
+            )
+        )
+        store.flush()
+
+        cache = PersistentHashCache(store)
+        with mock.patch(
+            "dupefinder.hashing.full_hash", side_effect=AssertionError("must not read")
+        ):
+            digest = cache.full(path)
+
+        self.assertEqual(digest, "precomputed")
+        self.assertEqual(cache.cache_hits, 1)
+        self.assertEqual(cache.cache_misses, 0)
+        cache.close()
+
+    def test_a_miss_computes_and_persists_for_the_next_run(self) -> None:
+        build_tree(self.root, {"file.bin": b"content"})
+        path = os.path.join(self.root, "file.bin")
+        db_path = os.path.join(self.root, "hashes.db")
+
+        store = Store(db_path)
+        cache = PersistentHashCache(store)
+        digest = cache.full(path)
+        self.assertEqual(cache.cache_misses, 1)
+        cache.close()  # flush -- the resumability guarantee
+
+        reopened_store = Store(db_path)
+        reopened_cache = PersistentHashCache(reopened_store)
+        with mock.patch(
+            "dupefinder.hashing.full_hash", side_effect=AssertionError("must not read")
+        ):
+            second = reopened_cache.full(path)
+        self.assertEqual(second, digest)
+        self.assertEqual(reopened_cache.cache_hits, 1)
+        reopened_cache.close()
 
 
 if __name__ == "__main__":
