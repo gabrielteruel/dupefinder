@@ -353,6 +353,69 @@ class SampledPreFilterTests(TempTreeCase):
             [(r.rel_path, r.status, r.duplicate_of) for r in without_filter.rows],
         )
 
+    def _build_b_participating_tree(self):
+        # Same 64 KiB prefix (so all three land in one partial bucket) and
+        # same overall size (so b/no_match.bin's size is present in A and it
+        # actually reaches the slow path at all -- only A's sizes are ever
+        # iterated). a/one.bin and b/match.bin are byte-identical;
+        # b/no_match.bin shares the prefix but differs in the tail, which the
+        # sampled read (middle + last 64 KiB) does cover for this file size.
+        prefix = os.urandom(65536)
+        build_tree(
+            self.root,
+            {
+                "a/one.bin": prefix + b"S" * 4096,
+                "b/match.bin": prefix + b"S" * 4096,
+                "b/no_match.bin": prefix + b"X" * 4096,
+            },
+        )
+        entries_a = _entries(self.root, ["a/one.bin"])
+        entries_b = _entries(self.root, ["b/match.bin", "b/no_match.bin"])
+        return entries_a, entries_b
+
+    def test_present_in_b_and_a_b_only_bucket_are_resolved_through_the_sampled_stage(
+        self,
+    ) -> None:
+        # Covers two things no other test in this class exercises:
+        # 1. A byte-identical A/B pair reaching present_in_b through the
+        #    sampled stage -- a sampled match must still fall through to a
+        #    real full hash before that verdict is reached.
+        # 2. The "no A member" skip branch in the sampled-subgroup loop:
+        #    b/no_match.bin lands alone in its own sampled bucket with no A
+        #    member, and must never be full-hashed as a result.
+        entries_a, entries_b = self._build_b_participating_tree()
+        cache = HashCache()
+
+        with mock.patch("dupefinder.comparer.SAMPLE_THRESHOLD", 1024):
+            report = compare(entries_a, entries_b, cache)
+
+        rows = _rows_by_path(report)
+        self.assertEqual(rows["a/one.bin"].status, "present_in_b")
+        self.assertEqual(cache.sampled_calls, 3)
+        # Only a/one.bin and b/match.bin -- the pair that actually shared a
+        # sampled digest -- were full-hashed. b/no_match.bin's bucket had no
+        # A member and must have been skipped instead of full-hashed.
+        self.assertEqual(cache.full_calls, 2)
+
+    def test_verdicts_with_b_participating_match_a_run_with_the_sampled_stage_disabled(
+        self,
+    ) -> None:
+        # Sibling of test_verdicts_match_a_run_with_the_sampled_stage_disabled
+        # that actually exercises a case where B participates in the sampled
+        # stage (present_in_b plus a B-only, no-A-member bucket), not just an
+        # all-A-exclusive tree.
+        entries_a, entries_b = self._build_b_participating_tree()
+
+        with mock.patch("dupefinder.comparer.SAMPLE_THRESHOLD", 1024):
+            with_filter = compare(entries_a, entries_b, HashCache())
+        with mock.patch("dupefinder.comparer.SAMPLE_THRESHOLD", 1 << 60):
+            without_filter = compare(entries_a, entries_b, HashCache())
+
+        self.assertEqual(
+            [(r.rel_path, r.status, r.duplicate_of) for r in with_filter.rows],
+            [(r.rel_path, r.status, r.duplicate_of) for r in without_filter.rows],
+        )
+
 
 class HashManyGeneratorInputTests(unittest.TestCase):
     def test_generator_input_under_threading_does_not_silently_drop_items(self) -> None:

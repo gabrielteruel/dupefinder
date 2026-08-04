@@ -206,7 +206,6 @@ class PersistentHashCache(HashCache):
         if row is not None and row.sampled is not None:
             with self._lock:
                 self._sampled[path] = row.sampled
-                self.sampled_calls += 1
                 self.cache_hits += 1
             return row.sampled
 

@@ -166,6 +166,41 @@ class PersistentHashCacheTests(TempTreeCase):
         self.assertEqual(cache.full_calls, 0)
         cache.close()
 
+    def test_sampled_serves_a_stored_digest_without_recomputing_or_counting_it_as_computed(
+        self,
+    ) -> None:
+        # Mirror of test_serves_a_stored_digest_without_recomputing for
+        # .sampled() -- a store hit must not bump sampled_calls, since
+        # Stats.sampled_hashes = cache.sampled_calls feeds the report's "N
+        # sampled hashes computed" figure. A fully-resumed scan (all cache
+        # hits) must report zero, not N, even though N files were served.
+        build_tree(self.root, {"file.bin": b"content"})
+        path = os.path.join(self.root, "file.bin")
+        st = os.stat(path)
+
+        db_path = os.path.join(self.root, "hashes.db")
+        store = Store(db_path)
+        store.put_hash(
+            HashRow(
+                path=path, size=st.st_size, mtime_ns=st.st_mtime_ns, partial=None,
+                sampled="precomputed",
+            )
+        )
+        store.flush()
+
+        cache = PersistentHashCache(store)
+        with mock.patch(
+            "dupefinder.hashing.sampled_hash", side_effect=AssertionError("must not read")
+        ):
+            digest = cache.sampled(path)
+
+        self.assertEqual(digest, "precomputed")
+        self.assertEqual(cache.cache_hits, 1)
+        self.assertEqual(cache.cache_misses, 0)
+        # A store hit must not count as a computed hash -- see docstring above.
+        self.assertEqual(cache.sampled_calls, 0)
+        cache.close()
+
     def test_a_miss_computes_and_persists_for_the_next_run(self) -> None:
         build_tree(self.root, {"file.bin": b"content"})
         path = os.path.join(self.root, "file.bin")
