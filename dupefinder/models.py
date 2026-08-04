@@ -55,6 +55,7 @@ class Stats:
     bytes_a: int = 0
     bytes_b: int = 0
     partial_hashes: int = 0
+    sampled_hashes: int = 0
     full_hashes: int = 0
     bytes_read: int = 0
     elapsed_seconds: float = 0.0

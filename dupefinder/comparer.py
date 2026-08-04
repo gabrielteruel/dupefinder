@@ -7,7 +7,12 @@ candidates as cheaply as possible and only reads bytes when it must:
    size is unique within A and absent from B, that file is exclusive and
    unique -- decided with zero bytes read.
 2. Partial hash (first 64 KiB) on the size buckets that remain.
-3. Full SHA-256 only on files that survive stage 2.
+3. Sampled hash (middle + last 64 KiB + size) for files above 8 MiB that
+   survive stage 2. Purely eliminating: it can prove two files different, but
+   a match always falls through to stage 4. See "Hashing Strategy Evaluation"
+   in docs/superpowers/plans/2026-08-04-resumability.md for why identity is
+   never concluded from a sample.
+4. Full SHA-256 only on files that survive stage 3.
 
 On typical photo/document trees this avoids reading well over 90% of the bytes.
 
@@ -23,7 +28,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
-from dupefinder.hashing import HashCache, ReadError
+from dupefinder.hashing import SAMPLE_THRESHOLD, HashCache, ReadError
 from dupefinder.models import FileEntry, Report, ReportRow, ScanError, ScanProgress, Stats
 
 
@@ -106,10 +111,11 @@ def compare(
                     continue
                 partial_buckets[result].append((entry, origin))
 
-            # SLOW PATH, stage 3: full hash, only where the partial hash did
-            # not already prove a file unique to A.
+            # SLOW PATH, stage 3: refine the partial buckets with a sampled
+            # hash before paying for any full read.
             b_digests_this_size: set[str] = set()
             a_with_full_hash: list[tuple[FileEntry, str]] = []
+            refined_groups: list[list[tuple[FileEntry, str]]] = []
 
             for group in partial_buckets.values():
                 if len(group) == 1 and group[0][1] == "a":
@@ -118,6 +124,46 @@ def compare(
                     bytes_resolved += entry.size
                     continue
 
+                # Only worth two extra seeks on files big enough that a full
+                # read would dominate. Below the threshold, go straight to the
+                # full hash exactly as before.
+                if not all(e.size >= SAMPLE_THRESHOLD for e, _o in group):
+                    refined_groups.append(group)
+                    continue
+
+                sampled_buckets: dict[str, list[tuple[FileEntry, str]]] = defaultdict(list)
+                for entry, origin, result in _hash_many(group, cache.sampled, executor):
+                    current_path = entry.abs_path
+                    if isinstance(result, ReadError):
+                        if origin == "a":
+                            rows.append(_row(entry, status="unreadable"))
+                        errors.append(ScanError(path=entry.abs_path, error=str(result)))
+                        bytes_resolved += entry.size
+                        continue
+                    sampled_buckets[result].append((entry, origin))
+
+                for subgroup in sampled_buckets.values():
+                    # A file alone in its sampled bucket cannot be byte
+                    # identical to anything else here: identical content
+                    # necessarily produces an identical sampled hash.
+                    if len(subgroup) == 1 and subgroup[0][1] == "a":
+                        entry, _origin = subgroup[0]
+                        rows.append(_row(entry, status="exclusive"))
+                        bytes_resolved += entry.size
+                        continue
+                    # A bucket with no A member can never be consulted: only
+                    # A files are classified against b_full_hashes, and a
+                    # matching A file would share this sampled hash and so
+                    # would be in this very bucket.
+                    if not any(origin == "a" for _e, origin in subgroup):
+                        for entry, _origin in subgroup:
+                            bytes_resolved += entry.size
+                        continue
+                    refined_groups.append(subgroup)
+
+            # A sampled match proves nothing on its own -- the full hash is
+            # what decides identity.
+            for group in refined_groups:
                 for entry, origin, result in _hash_many(group, cache.full, executor):
                     current_path = entry.abs_path
                     if isinstance(result, ReadError):
@@ -175,6 +221,7 @@ def compare(
         bytes_a=sum(e.size for e in entries_a),
         bytes_b=sum(e.size for e in entries_b),
         partial_hashes=cache.partial_calls,
+        sampled_hashes=cache.sampled_calls,
         full_hashes=cache.full_calls,
         bytes_read=cache.bytes_read,
         elapsed_seconds=time.perf_counter() - start,

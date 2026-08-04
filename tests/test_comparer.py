@@ -3,6 +3,7 @@
 import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 from dupefinder.comparer import _hash_many, compare
 from dupefinder.hashing import HashCache, PersistentHashCache
@@ -277,6 +278,80 @@ class BytesProgressTests(TempTreeCase):
         self.assertEqual(resumed.bytes_read, 0)
         self.assertEqual(snapshots[-1].bytes_resolved, snapshots[-1].bytes_to_resolve)
         self.assertGreater(snapshots[-1].bytes_to_resolve, 0)
+
+
+class SampledPreFilterTests(TempTreeCase):
+    """The sampled stage must eliminate work without ever changing a verdict."""
+
+    def _build_prefix_collision_tree(self):
+        # Same size, same first 64 KiB, different tails -- the case that
+        # forces a full read today.
+        prefix = os.urandom(65536)
+        build_tree(
+            self.root,
+            {"a/one.bin": prefix + b"A" * 4096, "a/two.bin": prefix + b"B" * 4096},
+        )
+        return _entries(self.root, ["a/one.bin", "a/two.bin"])
+
+    def test_large_differing_files_are_resolved_without_a_full_hash(self) -> None:
+        entries_a = self._build_prefix_collision_tree()
+        cache = HashCache()
+
+        with mock.patch("dupefinder.comparer.SAMPLE_THRESHOLD", 1024):
+            report = compare(entries_a, [], cache)
+
+        rows = _rows_by_path(report)
+        self.assertEqual(rows["a/one.bin"].status, "exclusive")
+        self.assertEqual(rows["a/two.bin"].status, "exclusive")
+        self.assertEqual(cache.sampled_calls, 2)
+        self.assertEqual(cache.full_calls, 0)  # the whole point: no full read
+
+    def test_identical_large_files_still_fall_through_to_the_full_hash(self) -> None:
+        # A sampled match proves nothing on its own, so it must NOT short
+        # circuit -- the full hash is what decides identity.
+        content = os.urandom(65536) + b"tail"
+        build_tree(self.root, {"a/one.bin": content, "a/two.bin": content})
+        entries_a = _entries(self.root, ["a/one.bin", "a/two.bin"])
+        cache = HashCache()
+
+        with mock.patch("dupefinder.comparer.SAMPLE_THRESHOLD", 1024):
+            report = compare(entries_a, [], cache)
+
+        rows = _rows_by_path(report)
+        self.assertEqual(rows["a/one.bin"].status, "exclusive")
+        self.assertEqual(rows["a/two.bin"].status, "internal_copy")
+        self.assertEqual(rows["a/two.bin"].duplicate_of, "a/one.bin")
+        self.assertEqual(cache.full_calls, 2)
+
+    def test_files_below_the_threshold_never_use_the_sampled_stage(self) -> None:
+        # Identical tiny files land in the same partial bucket, so they DO
+        # reach the point where the sampled stage would fire -- and must skip
+        # it on size, going straight to the full hash as before.
+        build_tree(self.root, {"a/one.bin": b"same tiny content", "a/two.bin": b"same tiny content"})
+        entries_a = _entries(self.root, ["a/one.bin", "a/two.bin"])
+        cache = HashCache()
+
+        report = compare(entries_a, [], cache)  # real 8 MiB threshold, tiny files
+
+        self.assertEqual(cache.sampled_calls, 0)
+        self.assertEqual(cache.full_calls, 2)
+        rows = _rows_by_path(report)
+        self.assertEqual(rows["a/two.bin"].status, "internal_copy")
+
+    def test_verdicts_match_a_run_with_the_sampled_stage_disabled(self) -> None:
+        # The pre-filter is an optimisation: identical classification, fewer
+        # bytes read. An unreachable threshold disables it entirely.
+        entries_a = self._build_prefix_collision_tree()
+
+        with mock.patch("dupefinder.comparer.SAMPLE_THRESHOLD", 1024):
+            with_filter = compare(entries_a, [], HashCache())
+        with mock.patch("dupefinder.comparer.SAMPLE_THRESHOLD", 1 << 60):
+            without_filter = compare(entries_a, [], HashCache())
+
+        self.assertEqual(
+            [(r.rel_path, r.status, r.duplicate_of) for r in with_filter.rows],
+            [(r.rel_path, r.status, r.duplicate_of) for r in without_filter.rows],
+        )
 
 
 class HashManyGeneratorInputTests(unittest.TestCase):
