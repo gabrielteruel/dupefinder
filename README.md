@@ -132,7 +132,11 @@ python3 -m unittest discover tests -v
 dupefinder/    scanning, hashing, comparison, moving, and the HTTP server
 web/           the static frontend (no build step)
 tests/         unittest suite
+docs/          design rationale
 ```
+
+[`docs/design.md`](docs/design.md) covers why the tool is built this way — the comparison
+pipeline, the safety guarantees and how they're enforced, and some non-obvious WSL behaviour.
 
 ## License
 

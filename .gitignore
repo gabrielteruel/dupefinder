@@ -17,3 +17,8 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Internal working specs, written to be handed to an implementing model.
+# They contain machine-specific details and describe work that may not exist
+# yet, so they stay local. Durable design rationale lives in docs/design.md.
+*_SPEC.md
