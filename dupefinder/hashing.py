@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import threading
 
 CHUNK_SIZE = 1024 * 1024  # 1 MiB read buffer
 PARTIAL_SIZE = 64 * 1024  # 64 KiB prefix used by the cheap pre-filter
@@ -45,40 +46,54 @@ def full_hash(path: str) -> str:
 class HashCache:
     """Memoizes digests per absolute path for the lifetime of one scan job.
 
-    Also accumulates the statistics reported to the UI.
+    Also accumulates the statistics reported to the UI. Thread-safe: a lock
+    guards only dict and counter mutation, never open()/read() itself, so
+    concurrent reads genuinely overlap.
     """
 
     def __init__(self) -> None:
         self._partial: dict[str, str] = {}
         self._full: dict[str, str] = {}
+        self._lock = threading.Lock()
         self.partial_calls = 0
         self.full_calls = 0
         self.bytes_read = 0
 
     def partial(self, path: str) -> str:
-        cached = self._partial.get(path)
+        with self._lock:
+            cached = self._partial.get(path)
         if cached is not None:
             return cached
-        digest = partial_hash(path)
-        self._partial[path] = digest
-        self.partial_calls += 1
+
+        digest = partial_hash(path)  # I/O outside the lock -- this is the point
         try:
             size = os.stat(path).st_size
         except OSError:
             size = 0
-        self.bytes_read += min(size, PARTIAL_SIZE)
+
+        with self._lock:
+            self._partial[path] = digest
+            self.partial_calls += 1
+            self.bytes_read += min(size, PARTIAL_SIZE)
         return digest
 
     def full(self, path: str) -> str:
-        cached = self._full.get(path)
+        with self._lock:
+            cached = self._full.get(path)
         if cached is not None:
             return cached
+
         digest = full_hash(path)
-        self._full[path] = digest
-        self.full_calls += 1
         try:
             size = os.stat(path).st_size
         except OSError:
             size = 0
-        self.bytes_read += size
+
+        with self._lock:
+            self._full[path] = digest
+            self.full_calls += 1
+            self.bytes_read += size
         return digest
+
+    def close(self) -> None:
+        """No-op for the in-memory cache; overridden by PersistentHashCache."""

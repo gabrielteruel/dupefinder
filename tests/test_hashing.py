@@ -3,6 +3,8 @@
 import hashlib
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 from dupefinder.hashing import CHUNK_SIZE, HashCache, ReadError, full_hash, partial_hash
 from tests.helpers import TempTreeCase, build_tree
@@ -49,6 +51,23 @@ class HashCacheTests(TempTreeCase):
 
         self.assertEqual(first, second)
         self.assertEqual(cache.full_calls, 1)
+
+
+class ConcurrentAccessTests(TempTreeCase):
+    def test_thread_pool_over_distinct_files_has_no_lost_counter_updates(self) -> None:
+        spec = {f"file{i}.bin": os.urandom(1024) for i in range(20)}
+        build_tree(self.root, spec)
+        cache = HashCache()
+        paths = [os.path.join(self.root, name) for name in spec]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            digests = list(pool.map(cache.full, paths))
+
+        for path, digest in zip(paths, digests):
+            with open(path, "rb") as f:
+                expected = hashlib.sha256(f.read()).hexdigest()
+            self.assertEqual(digest, expected)
+        self.assertEqual(cache.full_calls, len(paths))
 
 
 class ReadErrorTests(TempTreeCase):
