@@ -44,6 +44,41 @@ body {
   padding: 16px 32px 64px;
 }
 
+.path-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-top: 16px;
+  font-size: 0.85rem;
+}
+
+.path-summary[hidden] {
+  display: none;
+}
+
+.path-summary-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.path-summary-label {
+  color: var(--text-dim);
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 90px;
+}
+
+.path-summary-value {
+  color: var(--text);
+  /* Never truncated: the full path always wraps rather than being cut off. */
+  word-break: break-all;
+}
+
 .screen {
   display: none;
   background: var(--panel);

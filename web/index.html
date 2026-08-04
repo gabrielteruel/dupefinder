@@ -14,6 +14,22 @@
 
   <main class="app-main">
 
+    <!-- Shows the chosen A/B/destination paths on every screen after selection -->
+    <div id="path-summary" class="path-summary" hidden>
+      <div class="path-summary-item">
+        <span class="path-summary-label">Folder A</span>
+        <span id="summary-path-a" class="path-summary-value"></span>
+      </div>
+      <div class="path-summary-item">
+        <span class="path-summary-label">Folder B</span>
+        <span id="summary-path-b" class="path-summary-value"></span>
+      </div>
+      <div class="path-summary-item">
+        <span class="path-summary-label">Destination</span>
+        <span id="summary-path-dest" class="path-summary-value"></span>
+      </div>
+    </div>
+
     <!-- SCREEN 1: folder selection -->
     <section id="screen-select" class="screen active">
       <h2>1. Choose folders</h2>

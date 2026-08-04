@@ -86,6 +86,16 @@ async function api(path, method, body) {
 function showScreen(id) {
   document.querySelectorAll(".screen").forEach((el) => el.classList.remove("active"));
   document.getElementById(id).classList.add("active");
+
+  // The path summary is redundant with the inputs on screen 1, so it only
+  // shows on the screens that follow folder selection.
+  document.getElementById("path-summary").hidden = id === "screen-select";
+}
+
+function updatePathSummary() {
+  document.getElementById("summary-path-a").textContent = state.paths.a;
+  document.getElementById("summary-path-b").textContent = state.paths.b;
+  document.getElementById("summary-path-dest").textContent = state.paths.dest;
 }
 
 /**
@@ -143,6 +153,7 @@ btnContinueSelect.addEventListener("click", () => {
       const data = await api("/api/prescan", "POST", { a: state.paths.a, b: state.paths.b });
       state.noisy = data.noisy;
       state.rules = {};
+      updatePathSummary();
       showScreen("screen-prescan");
 
       const hasNoisy = state.noisy.length > 0;
@@ -600,4 +611,5 @@ function resetState() {
   document.getElementById("btn-continue-select").disabled = true;
   document.getElementById("btn-start-scan").disabled = false;
   document.getElementById("scan-progress").hidden = true;
+  updatePathSummary();
 }
