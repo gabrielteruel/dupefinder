@@ -9,13 +9,14 @@ import threading
 import time
 import traceback
 import uuid
+import webbrowser
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from dupefinder.comparer import compare
-from dupefinder.diskinfo import combine, detect
+from dupefinder.diskinfo import combine, detect, is_wsl
 from dupefinder.eta import EtaEstimator
 from dupefinder.hashing import HashCache, PersistentHashCache
 from dupefinder.models import NoisyDir, Report
@@ -197,13 +198,15 @@ def _run_scan_job(
 
 
 def _drive_shortcuts() -> list[dict]:
-    """List Windows drives currently mounted under /mnt (WSL).
+    """List available drives: A:-Z: on native Windows, or mounted /mnt/<letter> on WSL/Linux."""
+    if os.name == "nt":
+        shortcuts = []
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            root = f"{letter}:\\"
+            if os.path.exists(root):
+                shortcuts.append({"name": f"Drive {letter}:", "path": root})
+        return shortcuts
 
-    os.path.ismount() filters out stale mount points -- an empty /mnt/d left
-    behind by a previous session is a directory, but not a mounted drive.
-    Requiring a single-letter name excludes WSL's own /mnt/wsl and /mnt/wslg.
-    Returns an empty list on any error, so the picker still works off WSL.
-    """
     shortcuts: list[dict] = []
     try:
         names = sorted(os.listdir("/mnt"))
@@ -592,12 +595,35 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _open_browser(url: str) -> None:
-    for cmd in (["wslview", url], ["xdg-open", url], ["explorer.exe", url]):
-        try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Open `url` in the default browser, never failing the server if it can't.
+
+    webbrowser is deliberately not used first on WSL: it would try to launch
+    a Linux browser that usually isn't installed there.
+    """
+    if is_wsl():
+        for cmd in (["wslview", url], ["explorer.exe", url]):
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except OSError:
+                continue
+        print(f"Could not open a browser automatically. Open {url} manually.")
+        return
+
+    if sys.platform == "darwin" or os.name == "nt":
+        if webbrowser.open(url):
             return
-        except OSError:
-            continue
+        print(f"Could not open a browser automatically. Open {url} manually.")
+        return
+
+    # Native Linux
+    try:
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    except OSError:
+        pass
+    if webbrowser.open(url):
+        return
     print(f"Could not open a browser automatically. Open {url} manually.")
 
 

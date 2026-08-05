@@ -74,6 +74,20 @@ class DriveShortcutsTests(unittest.TestCase):
             self.assertEqual(_drive_shortcuts(), [])
 
 
+class DriveShortcutsWindowsTests(unittest.TestCase):
+    def test_returns_existing_drive_letters_on_windows(self) -> None:
+        existing = {"C:\\", "D:\\"}
+        with (
+            mock.patch("os.name", "nt"),
+            mock.patch("os.path.exists", side_effect=lambda p: p in existing),
+        ):
+            result = _drive_shortcuts()
+
+        self.assertEqual(
+            result, [{"name": "Drive C:", "path": "C:\\"}, {"name": "Drive D:", "path": "D:\\"}]
+        )
+
+
 class SingleFlightTests(unittest.TestCase):
     def test_refuses_a_second_entry_for_the_same_key(self) -> None:
         with _single_flight("k"):
