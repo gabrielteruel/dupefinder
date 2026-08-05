@@ -25,7 +25,7 @@ table of exactly what it found, tick what you want, and only then does anything 
   external dependencies of any kind. (Developed and tested on 3.12.)
 - A web browser.
 
-Runs on Linux, macOS and Windows via WSL.
+Runs natively on Linux, macOS and Windows, and on Windows via WSL.
 
 ## Quick start
 
@@ -75,16 +75,60 @@ deliberately narrow:
 
 ## How it works
 
-Hashing every file would be painfully slow, so comparison runs in three stages, each only
+Hashing every file would be painfully slow, so comparison runs in four stages, each only
 handling what the previous one couldn't already decide:
 
 1. **Size buckets.** Two files of different sizes can never be equal. A file whose size is
    unique within A and absent from B is exclusive — decided with **zero bytes read**.
 2. **Partial hash** (first 64 KiB) for the files that do share a size with something else.
-3. **Full SHA-256**, only for files that also share a partial hash.
+3. **Sampled hash**, for files above 8 MiB that still share a size and a partial hash: two more
+   64 KiB reads, from the middle and the end of the file, to rule out non-matches cheaply before
+   committing to a full read.
+4. **Full SHA-256**, only for files that also share a partial hash and, where applicable, a
+   sampled hash.
 
 On a typical folder of photos or documents, the vast majority of bytes on disk are never read
 at all.
+
+**Why large files are still read in full.** Two files that share a size and an identical first
+64 KiB are usually — but not always — the same file. Disk images, preallocated downloads and
+some video containers can match for a long way and diverge later, so dupefinder never declares
+two files identical from a sample. Sampling is used only to prove files *different* cheaply:
+for anything above 8 MiB it checks the middle and the end of the file first, which rules out
+most non-matches in a fraction of a second instead of minutes. Anything that survives that is
+read in full, because a wrong "you already have this" is the one error that could cost you a
+file later.
+
+## Resuming an interrupted scan
+
+Every hash dupefinder computes is cached in a local SQLite database, kept under your user
+cache directory — **never on the scanned drive itself**. Kill a scan partway through and
+re-run it: already-hashed files are skipped, and the scan picks up close to where it left off.
+Re-scan the same drive again later, weeks on, and only files that changed (by size and
+modification time) get re-hashed — everything else is served straight from the cache.
+
+The "Performance" panel shown before a scan lets you clear the cache or see how much it holds,
+and a "Reuse cached hashes" checkbox is the escape hatch for the rare case where you want every
+file re-read from scratch regardless of what's cached.
+
+### Concurrent reads
+
+The pre-scan "Performance" panel suggests an `io_workers` value based on the detected disk
+type. The right number of concurrent readers depends on what's actually slow:
+
+- On a network share, WSL-mounted Windows drive, or SSD/NVMe, the bottleneck is usually
+  **latency** per request, not raw throughput — several reads in flight at once can finish
+  faster than one at a time.
+- On a spinning disk (HDD), concurrency usually **hurts**: what looks like several parallel
+  reads becomes the drive head seeking back and forth between them, which is slower than reading
+  one file through to the end before starting the next.
+
+The default (`io_workers=1`) matches previous behavior exactly and is always safe; raising it is
+an opt-in tradeoff, not a universal win.
+
+The estimated time remaining shown during comparison is deliberately conservative: it's computed
+from an upper bound on the bytes left to resolve, so it's expected to drift *downward* as a scan
+progresses rather than staying fixed or climbing.
 
 ## Platform notes: external drives on WSL
 
@@ -136,7 +180,8 @@ docs/          design rationale
 ```
 
 [`docs/design.md`](docs/design.md) covers why the tool is built this way — the comparison
-pipeline, the safety guarantees and how they're enforced, and some non-obvious WSL behaviour.
+pipeline, the safety guarantees and how they're enforced, the persistent cache and concurrency
+model, and some non-obvious platform behaviour (WSL especially).
 
 ## License
 
