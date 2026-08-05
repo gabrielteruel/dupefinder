@@ -272,6 +272,13 @@ def handle_prescan(body: dict) -> tuple[int, dict]:
     except ValueError as exc:
         return 400, {"error": str(exc)}
 
+    # realpath, not the raw input: on Windows this resolves through
+    # _getfinalpathname, which returns the \\?\-prefixed extended-length form
+    # for paths that exist. Everything downstream (os.walk, os.stat, open)
+    # then bypasses MAX_PATH (260 chars) instead of failing with WinError 3 on
+    # a deeply nested tree.
+    a, b = os.path.realpath(a), os.path.realpath(b)
+
     # Walking both trees is expensive; refuse a duplicate rather than race it.
     with _single_flight(f"prescan:{a}|{b}"):
         noisy = find_noisy_dirs(a, "A") + find_noisy_dirs(b, "B")
@@ -293,6 +300,10 @@ def handle_scan(body: dict) -> tuple[int, dict]:
         validate_sources(a, b)
     except ValueError as exc:
         return 400, {"error": str(exc)}
+
+    # See the matching comment in handle_prescan: this is what gives the scan
+    # and hash stages long-path support on Windows.
+    a, b = os.path.realpath(a), os.path.realpath(b)
 
     config = {"a": a, "b": b, "rules": rules, "io_workers": io_workers, "use_cache": use_cache}
 
@@ -377,6 +388,11 @@ def handle_apply(body: dict) -> tuple[int, dict]:
         validate_paths(a, b, dest)
     except ValueError as exc:
         return 400, {"error": str(exc)}
+
+    # dest may not exist yet (see validate_paths' docstring): realpath still
+    # resolves the \\?\ extended-length form on Windows by walking up to the
+    # deepest existing ancestor, so long destination trees stay long-path safe.
+    dest = os.path.realpath(dest)
 
     rows_by_id = {row.id: row for row in job.report.rows}
     entries: list[tuple[str, str]] = []
