@@ -1,9 +1,10 @@
 """Tests for dupefinder.diskinfo. All hardware/subprocess access is mocked."""
 
+import ntpath
 import unittest
 from unittest import mock
 
-from dupefinder.diskinfo import VolumeInfo, combine, detect
+from dupefinder.diskinfo import VolumeInfo, _detect_windows, _query_windows_physical_disk, combine, detect
 
 
 class WslDetectionTests(unittest.TestCase):
@@ -87,6 +88,39 @@ class RotationalNotConsultedOnWslTests(unittest.TestCase):
             mock.patch("builtins.open", side_effect=_fail_on_rotational),
         ):
             detect("/mnt/c/users")  # must not raise
+
+
+class WindowsDriveLetterInjectionTests(unittest.TestCase):
+    """POST /api/volumes reaches _detect_windows with an attacker-controlled
+    path and no validation. A crafted UNC-style path must never let shell
+    metacharacters reach subprocess.run's PowerShell -Command string.
+    """
+
+    def test_non_single_letter_drive_is_rejected_before_subprocess_run(self) -> None:
+        with mock.patch("subprocess.run") as run:
+            result = _query_windows_physical_disk("C; calc")
+
+        run.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_unc_style_path_with_shell_metacharacter_never_reaches_subprocess_run(self) -> None:
+        # ntpath.splitdrive has no sanitization: for a malformed UNC-style
+        # path it returns the entire path (including a `;`, PowerShell's
+        # statement separator) as the "drive". This is the exact shape of
+        # POST /api/volumes {"a": "\\\\x\\y; calc"} on native Windows.
+        malicious_path = r"\\x\y; calc"
+        drive, _ = ntpath.splitdrive(malicious_path)
+        self.assertIn(";", drive)  # sanity: confirms this reproduces the vulnerable shape
+
+        with (
+            mock.patch("os.path.splitdrive", return_value=(drive, "")),
+            mock.patch("subprocess.run") as run,
+        ):
+            info = _detect_windows(malicious_path)
+
+        run.assert_not_called()
+        self.assertEqual(info.kind, "unknown")
+        self.assertEqual(info.suggested_workers, 1)
 
 
 class CombineTests(unittest.TestCase):

@@ -49,7 +49,14 @@ def _query_windows_physical_disk(drive_letter: str) -> tuple[str, str] | None:
     Returns (media_type, bus_type) lowercase, or None on any failure --
     timeout, missing powershell.exe, non-zero exit, or unparsable output.
     Never raises.
+
+    `drive_letter` must be exactly one letter. It is interpolated directly
+    into a PowerShell -Command string, so anything else (e.g. a UNC path
+    fragment smuggled in through a malformed path) is rejected before it can
+    reach the shell -- never guessed at or partially sanitized.
     """
+    if not re.fullmatch(r"[A-Za-z]", drive_letter):
+        return None
     script = (
         f"$n = (Get-Volume -DriveLetter {drive_letter} | Get-Partition | Get-Disk).Number; "
         "$d = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq $n }; "

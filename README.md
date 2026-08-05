@@ -35,8 +35,14 @@ cd dupefinder
 ./run.sh
 ```
 
-It starts a server bound to `127.0.0.1` and prints the URL. On Linux and WSL it also opens
-your browser automatically; elsewhere, open the printed URL yourself.
+On Windows, use the bundled launcher instead:
+
+```bat
+run.cmd
+```
+
+It starts a server bound to `127.0.0.1` and prints the URL, opening your default browser
+automatically on Linux, WSL, macOS and native Windows alike.
 
 ```sh
 ./run.sh --port 8080     # use a specific port

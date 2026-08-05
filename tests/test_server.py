@@ -110,14 +110,43 @@ class SingleFlightTests(unittest.TestCase):
 
 
 class JobsTestCase(TempTreeCase):
-    """Base case that clears the global job registry around each test."""
+    """Base case that clears the global job registry around each test, and
+    points the persistent hash cache at this test's own temp dir instead of
+    the user's real ~/.cache/dupefinder.
+
+    Every test built on this class is a candidate for triggering a real scan
+    job (handle_scan defaults use_cache=True and spawns a background thread
+    running _run_scan_job -> PersistentHashCache(_open_job_store())), so the
+    override belongs here rather than in a narrower subclass -- without it,
+    the suite writes outside its own temp directory and can't run on a
+    machine where ~/.cache isn't writable.
+
+    handle_scan's scan thread is daemon=True and this test suite never joins
+    it directly, so it can still be alive after the test method returns. If
+    tearDown reset _CACHE_DIR_OVERRIDE and deleted the temp dir first, that
+    still-running thread would read _CACHE_DIR_OVERRIDE back as None the
+    moment it got around to calling _open_job_store(), and fall through to
+    the user's real cache directory -- the same non-hermeticity this class
+    exists to prevent, just delayed instead of avoided. So tearDown joins
+    any thread that appeared during the test before touching global state.
+    """
 
     def setUp(self) -> None:
         super().setUp()
         JOBS.clear()
+        self._threads_before = set(threading.enumerate())
+        server._STORE = None
+        server._CACHE_DIR_OVERRIDE = self.root
 
     def tearDown(self) -> None:
+        spawned = set(threading.enumerate()) - self._threads_before
+        for t in spawned:
+            t.join(timeout=5)
         JOBS.clear()
+        if server._STORE is not None:
+            server._STORE.close()
+        server._STORE = None
+        server._CACHE_DIR_OVERRIDE = None
         super().tearDown()
 
 
@@ -226,19 +255,13 @@ class ApplyOnceTests(JobsTestCase):
 
 
 class CacheTestCase(JobsTestCase):
-    """Points the persistent store at a temp dir and resets the singleton."""
+    """Marker subclass for tests that exercise the persistent cache directly.
 
-    def setUp(self) -> None:
-        super().setUp()
-        server._STORE = None
-        server._CACHE_DIR_OVERRIDE = self.root
-
-    def tearDown(self) -> None:
-        if server._STORE is not None:
-            server._STORE.close()
-        server._STORE = None
-        server._CACHE_DIR_OVERRIDE = None
-        super().tearDown()
+    JobsTestCase itself now points the persistent store at a temp dir and
+    resets the singleton around every test (see its docstring), so this
+    class no longer needs to duplicate that setup -- it exists purely to
+    group the cache-focused test classes below under a clearer name.
+    """
 
 
 class SettingsEndpointTests(CacheTestCase):

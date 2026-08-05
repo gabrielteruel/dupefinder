@@ -1,4 +1,5 @@
-"""The three-stage comparison pipeline: size bucket -> partial hash -> full hash.
+"""The four-stage comparison pipeline: size bucket -> partial hash -> sampled
+hash -> full hash.
 
 Hashing everything is prohibitively expensive, so this pipeline discards
 candidates as cheaply as possible and only reads bytes when it must:
@@ -9,9 +10,8 @@ candidates as cheaply as possible and only reads bytes when it must:
 2. Partial hash (first 64 KiB) on the size buckets that remain.
 3. Sampled hash (middle + last 64 KiB + size) for files above 8 MiB that
    survive stage 2. Purely eliminating: it can prove two files different, but
-   a match always falls through to stage 4. See "Hashing Strategy Evaluation"
-   in docs/superpowers/plans/2026-08-04-resumability.md for why identity is
-   never concluded from a sample.
+   a match always falls through to stage 4. See "The four-stage pipeline"
+   in docs/design.md (§2) for why identity is never concluded from a sample.
 4. Full SHA-256 only on files that survive stage 3.
 
 On typical photo/document trees this avoids reading well over 90% of the bytes.
