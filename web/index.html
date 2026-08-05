@@ -162,7 +162,7 @@
 
       <p id="report-summary" class="screen-hint"></p>
 
-      <div class="table-wrap">
+      <div class="table-wrap" id="report-table-wrap">
         <table id="report-table" class="data-table">
           <thead>
             <tr>
@@ -180,6 +180,8 @@
         <summary id="errors-summary">Read errors</summary>
         <ul id="errors-list"></ul>
       </details>
+
+      <p id="report-error" class="error-text" hidden></p>
 
       <div class="actions">
         <span id="selection-summary" class="selection-summary">0 files selected, 0 B</span>
@@ -209,6 +211,18 @@
       <div class="modal-actions">
         <button type="button" id="btn-browse-cancel" class="btn btn-secondary">Cancel</button>
         <button type="button" id="btn-browse-select" class="btn btn-primary">Select this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirmation dialog, replacing native confirm() -->
+  <div id="confirm-modal" class="modal-backdrop" hidden>
+    <div class="modal modal-narrow">
+      <h3 id="confirm-title">Confirm</h3>
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="modal-actions">
+        <button type="button" id="btn-confirm-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="btn-confirm-ok" class="btn btn-primary">Confirm</button>
       </div>
     </div>
   </div>

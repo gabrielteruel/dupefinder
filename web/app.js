@@ -19,6 +19,8 @@ const state = {
   sortDir: "asc",
   filterText: "",
   statusFilters: new Set(["exclusive", "internal_copy", "unreadable"]),
+  filteredRows: [],
+  scrollPending: false,
   busy: false, // a request-driven action is running
   browseBusy: false, // a folder-browse request is running
   ioWorkers: 1,
@@ -310,6 +312,47 @@ document.getElementById("btn-browse-select").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------
+// Confirmation dialog (replaces window.confirm)
+// ---------------------------------------------------------------------
+
+/** Promise-based replacement for window.confirm, styled like the rest of the app. */
+function confirmDialog({ title, message, confirmLabel = "Confirm" }) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("confirm-modal");
+    const okBtn = document.getElementById("btn-confirm-ok");
+    const cancelBtn = document.getElementById("btn-confirm-cancel");
+
+    document.getElementById("confirm-title").textContent = title;
+    document.getElementById("confirm-message").textContent = message;
+    okBtn.textContent = confirmLabel;
+    modal.hidden = false;
+    okBtn.focus();
+
+    function cleanup(result) {
+      modal.hidden = true;
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    }
+    function onOk() {
+      cleanup(true);
+    }
+    function onCancel() {
+      cleanup(false);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") cleanup(false);
+      if (e.key === "Enter") cleanup(true);
+    }
+
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey);
+  });
+}
+
+// ---------------------------------------------------------------------
 // Screen 2: noisy-directory pre-scan + scan progress
 // ---------------------------------------------------------------------
 
@@ -578,17 +621,19 @@ async function loadReport() {
     cacheSummary.hidden = true;
   }
 
+  renderReportTable();
   renderReportSummary();
   renderErrorsPanel();
-  renderReportTable();
   showScreen("screen-report");
 }
 
 function renderReportSummary() {
   const presentInB = state.rows.filter((r) => r.status === "present_in_b").length;
+  const shown = state.filteredRows.length;
   document.getElementById("report-summary").textContent =
-    `${state.rows.length} files scanned in folder A. ` +
-    `${presentInB} already exist in folder B (hidden from this table).`;
+    `${state.rows.length.toLocaleString()} files scanned in folder A. ` +
+    `${presentInB.toLocaleString()} already exist in folder B (hidden from this table). ` +
+    `Showing ${shown.toLocaleString()}.`;
 }
 
 function renderErrorsPanel() {
@@ -646,22 +691,72 @@ function rowHtml(row) {
   `;
 }
 
+// Must match the `height` declared for #report-table td in style.css.
+const ROW_HEIGHT = 36;
+const BUFFER_ROWS = 12; // rendered above and below the viewport, to absorb fast scrolling
+
 function renderReportTable() {
-  const tbody = document.getElementById("report-tbody");
-  const filtered = getFilteredSortedRows();
-  tbody.innerHTML = filtered.map(rowHtml).join("");
-
-  tbody.querySelectorAll("input[type=checkbox][data-row-id]").forEach((cb) => {
-    cb.addEventListener("change", () => {
-      const id = cb.dataset.rowId;
-      if (cb.checked) state.selected.add(id);
-      else state.selected.delete(id);
-      updateSelectionSummary();
-    });
-  });
-
+  state.filteredRows = getFilteredSortedRows();
+  const wrap = document.getElementById("report-table-wrap");
+  wrap.scrollTop = 0;
+  renderVisibleRows();
   updateSelectionSummary();
 }
+
+/**
+ * Render only the rows currently in view, padded above and below by spacer
+ * rows that reproduce the full scroll height.
+ *
+ * Without this, a report of 100k rows builds ~400k DOM nodes in one
+ * synchronous pass and freezes the tab.
+ */
+function renderVisibleRows() {
+  const wrap = document.getElementById("report-table-wrap");
+  const tbody = document.getElementById("report-tbody");
+  const rows = state.filteredRows;
+
+  const viewportHeight = wrap.clientHeight || 600;
+  const first = Math.max(0, Math.floor(wrap.scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
+  const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + BUFFER_ROWS * 2;
+  const last = Math.min(rows.length, first + visibleCount);
+
+  const topPad = first * ROW_HEIGHT;
+  const bottomPad = Math.max(0, (rows.length - last) * ROW_HEIGHT);
+
+  const html = [];
+  if (topPad > 0) {
+    html.push(`<tr class="spacer"><td colspan="4" style="height:${topPad}px"></td></tr>`);
+  }
+  for (let i = first; i < last; i += 1) {
+    html.push(rowHtml(rows[i]));
+  }
+  if (bottomPad > 0) {
+    html.push(`<tr class="spacer"><td colspan="4" style="height:${bottomPad}px"></td></tr>`);
+  }
+  tbody.innerHTML = html.join("");
+}
+
+// One delegated listener on the tbody, registered once. Rows are recreated on
+// every scroll, so per-row listeners would leak and be rebound constantly.
+document.getElementById("report-tbody").addEventListener("change", (e) => {
+  const cb = e.target.closest("input[type=checkbox][data-row-id]");
+  if (!cb) return;
+  const id = cb.dataset.rowId;
+  if (cb.checked) state.selected.add(id);
+  else state.selected.delete(id);
+  updateSelectionSummary();
+});
+
+// Re-render on scroll, throttled to one frame so a fast flick doesn't queue
+// dozens of renders.
+document.getElementById("report-table-wrap").addEventListener("scroll", () => {
+  if (state.scrollPending) return;
+  state.scrollPending = true;
+  requestAnimationFrame(() => {
+    state.scrollPending = false;
+    renderVisibleRows();
+  });
+});
 
 function updateSelectionSummary() {
   const selectedRows = state.rows.filter((r) => state.selected.has(r.id));
@@ -693,35 +788,46 @@ document.querySelectorAll("[data-status-filter]").forEach((cb) => {
   });
 });
 
+let filterTimer = null;
 document.getElementById("report-filter").addEventListener("input", (e) => {
   state.filterText = e.target.value;
-  renderReportTable();
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(renderReportTable, 150);
 });
 
 document.getElementById("btn-select-all").addEventListener("click", () => {
-  getFilteredSortedRows().forEach((r) => state.selected.add(r.id));
-  renderReportTable();
+  state.filteredRows.forEach((r) => state.selected.add(r.id));
+  renderVisibleRows();
+  updateSelectionSummary();
 });
 
 document.getElementById("btn-select-none").addEventListener("click", () => {
-  getFilteredSortedRows().forEach((r) => state.selected.delete(r.id));
-  renderReportTable();
+  state.filteredRows.forEach((r) => state.selected.delete(r.id));
+  renderVisibleRows();
+  updateSelectionSummary();
 });
 
 const btnApply = document.getElementById("btn-apply");
 
-btnApply.addEventListener("click", () => {
+btnApply.addEventListener("click", async () => {
+  const errorEl = document.getElementById("report-error");
+  errorEl.hidden = true;
+
   const selectedRows = state.rows.filter((r) => state.selected.has(r.id));
   if (selectedRows.length === 0) {
-    alert("Select at least one file to move.");
+    errorEl.hidden = false;
+    errorEl.textContent = "Select at least one file to move.";
     return;
   }
 
   const totalBytes = selectedRows.reduce((sum, r) => sum + r.size, 0);
-  const confirmed = confirm(
-    `Move ${selectedRows.length} file(s) (${formatBytes(totalBytes)}) to:\n${state.paths.dest}\n\n` +
-      "This cannot be undone from this UI. Continue?"
-  );
+  const confirmed = await confirmDialog({
+    title: "Move files?",
+    message:
+      `${selectedRows.length.toLocaleString()} file(s), ${formatBytes(totalBytes)} will be moved to:\n` +
+      `${state.paths.dest}\n\nThis cannot be undone from this UI.`,
+    confirmLabel: "Move files",
+  });
   if (!confirmed) return;
 
   runAction(btnApply, "Moving files…", async () => {
@@ -734,7 +840,8 @@ btnApply.addEventListener("click", () => {
       renderResult(result);
       showScreen("screen-result");
     } catch (err) {
-      alert(`Failed to move files: ${err.message}`);
+      errorEl.hidden = false;
+      errorEl.textContent = `Failed to move files: ${err.message}`;
     }
   });
 });
@@ -784,6 +891,7 @@ function resetState() {
   state.sortKey = "rel_path";
   state.sortDir = "asc";
   state.statusFilters = new Set(["exclusive", "internal_copy", "unreadable"]);
+  state.filteredRows = [];
 
   Object.values(pathInputs).forEach((input) => {
     input.value = "";
@@ -795,5 +903,6 @@ function resetState() {
   document.getElementById("btn-continue-select").disabled = true;
   document.getElementById("btn-start-scan").disabled = false;
   document.getElementById("scan-progress").hidden = true;
+  document.getElementById("report-error").hidden = true;
   updatePathSummary();
 }
