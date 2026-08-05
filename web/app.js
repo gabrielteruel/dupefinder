@@ -21,6 +21,11 @@ const state = {
   statusFilters: new Set(["exclusive", "internal_copy", "unreadable"]),
   busy: false, // a request-driven action is running
   browseBusy: false, // a folder-browse request is running
+  ioWorkers: 1,
+  useCache: true,
+  workersManuallySet: false,
+  cacheHits: 0,
+  cacheMisses: 0,
 };
 
 const pathInputs = {
@@ -52,6 +57,19 @@ function formatBytes(n) {
     unitIndex += 1;
   }
   return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return "less than a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `about ${minutes} minute${minutes !== 1 ? "s" : ""}`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes === 0 ? `about ${hours} h` : `about ${hours} h ${remMinutes} min`;
+}
+
+function formatThroughput(bps) {
+  return `${formatBytes(bps)}/s`;
 }
 
 function statusLabel(status) {
@@ -155,6 +173,7 @@ btnContinueSelect.addEventListener("click", () => {
       state.rules = {};
       updatePathSummary();
       showScreen("screen-prescan");
+      loadVolumeInfo();
 
       const hasNoisy = state.noisy.length > 0;
       document.getElementById("prescan-controls").hidden = !hasNoisy;
@@ -172,6 +191,55 @@ btnContinueSelect.addEventListener("click", () => {
     }
   });
 });
+
+async function loadSettings() {
+  try {
+    const data = await api("/api/settings", "GET");
+    if (data.last_paths) {
+      state.paths = { ...data.last_paths };
+      pathInputs.a.value = state.paths.a || "";
+      pathInputs.b.value = state.paths.b || "";
+      pathInputs.dest.value = state.paths.dest || "";
+      validateSelectScreen();
+    }
+    state.ioWorkers = data.io_workers || 1;
+    state.useCache = data.use_cache !== false;
+    document.getElementById("input-io-workers").value = state.ioWorkers;
+    document.getElementById("input-use-cache").checked = state.useCache;
+  } catch (err) {
+    // Settings are a convenience; failure must never block the app.
+  }
+}
+
+async function loadCacheStats() {
+  try {
+    const data = await api("/api/cache/stats", "GET");
+    document.getElementById("cache-settings-summary").textContent =
+      `Cached hashes: ${data.row_count.toLocaleString()} files, ${formatBytes(data.db_size_bytes)}`;
+  } catch (err) {
+    document.getElementById("cache-settings-summary").textContent = "";
+  }
+}
+
+document.getElementById("input-io-workers").addEventListener("input", (e) => {
+  state.workersManuallySet = true;
+  state.ioWorkers = Math.max(1, Math.min(32, Number(e.target.value) || 1));
+});
+
+document.getElementById("input-use-cache").addEventListener("change", (e) => {
+  state.useCache = e.target.checked;
+});
+
+document.getElementById("btn-clear-cache").addEventListener("click", () => {
+  const btn = document.getElementById("btn-clear-cache");
+  runAction(btn, "Clearing…", async () => {
+    await api("/api/cache/clear", "POST", {});
+    await loadCacheStats();
+  });
+});
+
+loadSettings();
+loadCacheStats();
 
 // ---------------------------------------------------------------------
 // Folder browse modal
@@ -245,6 +313,26 @@ document.getElementById("btn-browse-select").addEventListener("click", () => {
 // Screen 2: noisy-directory pre-scan + scan progress
 // ---------------------------------------------------------------------
 
+async function loadVolumeInfo() {
+  const container = document.getElementById("volume-info");
+  container.innerHTML = `<p class="screen-hint">Detecting disk types…</p>`;
+  try {
+    const data = await api("/api/volumes", "POST", { a: state.paths.a, b: state.paths.b });
+    container.innerHTML = data.volumes
+      .map(
+        (v, i) =>
+          `<p class="volume-line">Folder ${i === 0 ? "A" : "B"} — ${escapeHtml(v.path)} — ${escapeHtml(v.label)}</p>`
+      )
+      .join("");
+    if (!state.workersManuallySet) {
+      state.ioWorkers = data.suggested_workers;
+      document.getElementById("input-io-workers").value = data.suggested_workers;
+    }
+  } catch (err) {
+    container.innerHTML = `<p class="screen-hint">Could not detect disk types.</p>`;
+  }
+}
+
 function renderPrescanTable() {
   const tbody = document.getElementById("prescan-tbody");
 
@@ -303,12 +391,21 @@ async function startScan() {
   const errorEl = document.getElementById("prescan-error");
   errorEl.hidden = true;
   document.getElementById("scan-progress").hidden = false;
+  document.getElementById("scan-progress-stall").hidden = true;
+
+  await api("/api/settings", "POST", {
+    last_paths: { ...state.paths },
+    io_workers: state.ioWorkers,
+    use_cache: state.useCache,
+  }).catch(() => {});
 
   try {
     const data = await api("/api/scan", "POST", {
       a: state.paths.a,
       b: state.paths.b,
       rules: state.rules,
+      io_workers: state.ioWorkers,
+      use_cache: state.useCache,
     });
     state.jobId = data.job_id;
     // Awaited so the caller stays "busy" for the whole scan, not just the POST.
@@ -323,11 +420,13 @@ async function startScan() {
 function phaseLabel(phase, processed, total) {
   switch (phase) {
     case "scanning_a":
-      return "Scanning folder A…";
+      return `Scanning folder A… (${processed.toLocaleString()} files found)`;
     case "scanning_b":
-      return "Scanning folder B…";
+      return `Scanning folder B… (${processed.toLocaleString()} files found)`;
     case "comparing":
-      return total > 0 ? `Comparing files… (${processed}/${total})` : "Comparing files…";
+      return total > 0
+        ? `Comparing files… (${processed.toLocaleString()}/${total.toLocaleString()} size groups)`
+        : "Comparing files…";
     case "done":
       return "Done.";
     default:
@@ -335,16 +434,71 @@ function phaseLabel(phase, processed, total) {
   }
 }
 
+/**
+ * Fill the progress stats grid.
+ *
+ * The byte figures are only meaningful once bucketing has produced a total,
+ * which happens at the start of the comparing phase. During the two walk
+ * phases the total is genuinely unknowable, so those cells show an em dash
+ * rather than a misleading zero.
+ */
+function renderProgressStats(data) {
+  const set = (id, value) => {
+    document.getElementById(id).textContent = value;
+  };
+  const comparing = data.phase === "comparing" && data.bytes_to_resolve > 0;
+
+  if (comparing) {
+    const remaining = Math.max(0, data.bytes_to_resolve - data.bytes_resolved);
+    const pct = Math.min(100, Math.round((data.bytes_resolved / data.bytes_to_resolve) * 100));
+    set("stat-processed", `${formatBytes(data.bytes_resolved)} (${pct}%)`);
+    set("stat-remaining", formatBytes(remaining));
+    set("stat-total", formatBytes(data.bytes_to_resolve));
+    set("stat-speed", data.throughput_bps ? formatThroughput(data.throughput_bps) : "measuring…");
+    set(
+      "stat-eta",
+      data.eta_seconds !== null && data.eta_seconds !== undefined
+        ? formatDuration(data.eta_seconds)
+        : "estimating…"
+    );
+  } else {
+    set("stat-processed", "—");
+    set("stat-remaining", "—");
+    set("stat-total", "—");
+    set("stat-speed", "—");
+    set("stat-eta", "—"); // never invent an estimate during the walk phases
+  }
+
+  set("stat-elapsed", formatElapsed(data.elapsed_seconds));
+
+  const current = document.getElementById("scan-progress-current");
+  current.textContent = data.current_path ? `Reading: ${data.current_path}` : "";
+  current.title = data.current_path || "";
+}
+
+/** Elapsed time is a fact, not an estimate, so it is shown precisely. */
+function formatElapsed(seconds) {
+  const total = Math.floor(seconds || 0);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 /** Poll until the scan finishes. Resolves once the report is loaded or it fails. */
 function pollProgress() {
   const label = document.getElementById("scan-progress-label");
   const fill = document.getElementById("scan-progress-fill");
+  const stallWarning = document.getElementById("scan-progress-stall");
   const errorEl = document.getElementById("prescan-error");
 
   return new Promise((resolve) => {
     // A single in-flight poll at a time: a slow response must not pile up
     // requests behind it.
     let polling = false;
+    let lastSignature = null;
+    let lastChangeAt = Date.now();
 
     const interval = setInterval(async () => {
       if (polling) return;
@@ -353,16 +507,38 @@ function pollProgress() {
       try {
         const data = await api(`/api/progress?job=${encodeURIComponent(state.jobId)}`, "GET");
         label.textContent = phaseLabel(data.phase, data.processed, data.total);
+        renderProgressStats(data);
 
-        if (data.total > 0) {
+        // During comparing, drive the bar by bytes -- it matches the numbers
+        // in the stats grid, and a bucket count would disagree with them.
+        if (data.phase === "comparing" && data.bytes_to_resolve > 0) {
+          fill.classList.remove("indeterminate");
+          fill.style.width = `${Math.min(
+            100,
+            Math.round((data.bytes_resolved / data.bytes_to_resolve) * 100)
+          )}%`;
+        } else if (data.total > 0) {
           fill.classList.remove("indeterminate");
           fill.style.width = `${Math.min(100, Math.round((data.processed / data.total) * 100))}%`;
         } else {
           fill.classList.add("indeterminate");
         }
 
+        // A signature of "is anything moving" -- distinguishes slow from
+        // stuck without guessing at a specific number the server didn't send.
+        const signature = `${data.processed}|${data.bytes_resolved}|${data.current_path}`;
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          lastChangeAt = Date.now();
+          stallWarning.hidden = true;
+        } else if (Date.now() - lastChangeAt > 30000) {
+          stallWarning.hidden = false;
+        }
+
         if (data.status === "done") {
           clearInterval(interval);
+          state.cacheHits = data.cache_hits;
+          state.cacheMisses = data.cache_misses;
           await loadReport();
           resolve();
         } else if (data.status === "error") {
@@ -393,6 +569,14 @@ async function loadReport() {
   state.errors = data.errors;
   state.stats = data.stats;
   state.selected = new Set(state.rows.filter((r) => r.status === "exclusive").map((r) => r.id));
+
+  const cacheSummary = document.getElementById("cache-hit-summary");
+  if (state.useCache && (state.cacheHits || state.cacheMisses)) {
+    cacheSummary.hidden = false;
+    cacheSummary.textContent = `${state.cacheHits} files reused from cache, ${state.cacheMisses} newly hashed.`;
+  } else {
+    cacheSummary.hidden = true;
+  }
 
   renderReportSummary();
   renderErrorsPanel();

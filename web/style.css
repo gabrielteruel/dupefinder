@@ -436,3 +436,75 @@ select {
   gap: 10px;
   margin-top: 16px;
 }
+
+.performance-panel {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.performance-panel h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.volume-info {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+}
+
+.volume-info .volume-line {
+  color: var(--text);
+  margin: 2px 0;
+}
+
+#input-io-workers {
+  width: 80px;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 0.95rem;
+}
+
+.cache-settings {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--panel-border);
+  font-size: 0.85rem;
+}
+
+.progress-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px 16px;
+  margin: 14px 0 8px;
+}
+
+.progress-stat dt {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.progress-stat dd {
+  margin: 2px 0 0;
+  font-size: 1rem;
+  /* Tabular figures stop the numbers jittering sideways as they update. */
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-current {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  margin: 4px 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

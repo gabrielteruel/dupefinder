@@ -63,6 +63,11 @@
       <div class="actions">
         <button type="button" id="btn-continue-select" class="btn btn-primary" disabled>Continue</button>
       </div>
+
+      <div id="cache-settings" class="cache-settings">
+        <p id="cache-settings-summary" class="screen-hint"></p>
+        <button type="button" id="btn-clear-cache" class="btn btn-secondary">Clear cached hashes</button>
+      </div>
     </section>
 
     <!-- SCREEN 2: noisy-directory pre-scan + progress -->
@@ -98,6 +103,26 @@
         </table>
       </div>
 
+      <div id="performance-panel" class="performance-panel">
+        <h3>Performance</h3>
+        <div id="volume-info" class="volume-info">
+          <p class="screen-hint">Detecting disk types…</p>
+        </div>
+        <div class="field-row">
+          <label for="input-io-workers">Concurrent file reads</label>
+          <input type="number" id="input-io-workers" min="1" max="32" value="1" />
+          <p class="screen-hint">
+            Reading several files at once helps when each read has to wait — a network share, a WSL
+            drive, or an SSD. On a spinning hard disk it usually makes things <strong>slower</strong>,
+            because the drive head has to jump between files instead of reading in order.
+          </p>
+        </div>
+        <div class="field-row">
+          <label><input type="checkbox" id="input-use-cache" checked /> Reuse cached hashes</label>
+          <p id="cache-hit-summary" class="screen-hint" hidden></p>
+        </div>
+      </div>
+
       <div class="actions">
         <button type="button" id="btn-start-scan" class="btn btn-primary">Start scan</button>
       </div>
@@ -107,6 +132,16 @@
         <div class="progress-bar">
           <div id="scan-progress-fill" class="progress-bar-fill indeterminate"></div>
         </div>
+        <dl id="scan-progress-stats" class="progress-stats">
+          <div class="progress-stat"><dt>Processed</dt><dd id="stat-processed">—</dd></div>
+          <div class="progress-stat"><dt>Remaining</dt><dd id="stat-remaining">—</dd></div>
+          <div class="progress-stat"><dt>Total to compare</dt><dd id="stat-total">—</dd></div>
+          <div class="progress-stat"><dt>Speed</dt><dd id="stat-speed">—</dd></div>
+          <div class="progress-stat"><dt>Time remaining</dt><dd id="stat-eta">—</dd></div>
+          <div class="progress-stat"><dt>Elapsed</dt><dd id="stat-elapsed">—</dd></div>
+        </dl>
+        <p id="scan-progress-current" class="progress-current"></p>
+        <p id="scan-progress-stall" class="error-text" hidden>No progress for a while — this may be stuck.</p>
       </div>
 
       <p id="prescan-error" class="error-text" hidden></p>
