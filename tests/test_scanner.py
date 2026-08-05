@@ -56,6 +56,29 @@ class ScanTests(TempTreeCase):
         self.assertEqual(rel_paths, {"real/file.txt"})
 
 
+class ScanProgressTests(TempTreeCase):
+    def test_progress_callback_reports_the_final_count(self) -> None:
+        build_tree(self.root, {f"file{i}.txt": b"x" for i in range(5)})
+        calls = []
+
+        entries, _errors = scan(
+            self.root, skip_abs_paths=set(), progress=lambda n, p: calls.append((n, p))
+        )
+
+        self.assertTrue(calls)
+        self.assertEqual(calls[-1], (len(entries), ""))
+
+    def test_progress_is_throttled_not_called_once_per_file(self) -> None:
+        build_tree(self.root, {f"file{i}.txt": b"x" for i in range(50)})
+        calls = []
+
+        scan(self.root, skip_abs_paths=set(), progress=lambda n, p: calls.append((n, p)))
+
+        # 50 files created near-instantly must not produce 50 callback calls;
+        # the throttle collapses rapid completion into a handful of calls.
+        self.assertLess(len(calls), 50)
+
+
 class FindNoisyDirsTests(TempTreeCase):
     def test_reports_git_with_reason_count_and_bytes(self) -> None:
         build_tree(

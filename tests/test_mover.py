@@ -3,10 +3,11 @@
 import json
 import os
 import unittest
+from unittest import mock
 
 from dupefinder.hashing import HashCache
 from dupefinder.models import NoisyDir
-from dupefinder.mover import apply_moves, move_to_trash, validate_paths, write_report
+from dupefinder.mover import _is_inside, apply_moves, move_to_trash, validate_paths, write_report
 from tests.helpers import TempTreeCase, build_tree
 
 
@@ -142,6 +143,28 @@ class WriteReportTests(TempTreeCase):
         with open(report_path, encoding="utf-8") as f:
             loaded = json.load(f)
         self.assertEqual(loaded, payload)
+
+
+class IsInsideCrossDriveTests(unittest.TestCase):
+    def test_returns_false_instead_of_raising_for_paths_on_different_drives(self) -> None:
+        with mock.patch(
+            "os.path.commonpath", side_effect=ValueError("Paths don't have the same drive")
+        ):
+            self.assertFalse(_is_inside("C:\\x", "D:\\y"))
+
+
+class CaseInsensitiveWindowsTests(TempTreeCase):
+    def test_dest_inside_a_is_rejected_even_with_different_case(self) -> None:
+        # normcase is a no-op on POSIX; patch it to fold case exactly like
+        # ntpath.normcase does on real Windows.
+        build_tree(self.root, {"Fotos/.keep": b"", "b/.keep": b""})
+        a = os.path.join(self.root, "Fotos")
+        b = os.path.join(self.root, "b")
+        dest = os.path.join(self.root, "FOTOS", "dest")
+
+        with mock.patch("os.path.normcase", side_effect=str.lower):
+            with self.assertRaises(ValueError):
+                validate_paths(a, b, dest)
 
 
 if __name__ == "__main__":

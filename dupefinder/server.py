@@ -6,15 +6,19 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import uuid
+import webbrowser
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from dupefinder.comparer import compare
-from dupefinder.hashing import HashCache
+from dupefinder.diskinfo import combine, detect, is_wsl
+from dupefinder.eta import EtaEstimator
+from dupefinder.hashing import HashCache, PersistentHashCache
 from dupefinder.models import NoisyDir, Report
 from dupefinder.mover import (
     apply_moves,
@@ -24,6 +28,7 @@ from dupefinder.mover import (
     write_report,
 )
 from dupefinder.scanner import find_noisy_dirs, scan
+from dupefinder.store import Store, cache_dir
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web")
 DEFAULT_PORT = 8765
@@ -36,16 +41,61 @@ class Job:
     phase: str = "scanning_a"  # "scanning_a" | "scanning_b" | "comparing" | "done"
     processed: int = 0
     total: int = 0  # 0 means indeterminate (scanning phases)
+    bytes_resolved: int = 0
+    bytes_to_resolve: int = 0
+    current_path: str = ""
+    cache_hits: int = 0
+    cache_misses: int = 0
+    started_at: float = field(default_factory=time.monotonic)
     report: Report | None = None
     error: str | None = None
-    config: dict = field(default_factory=dict)  # {a, b, rules}
+    config: dict = field(default_factory=dict)  # {a, b, rules, io_workers, use_cache}
     trash_dirs: list[NoisyDir] = field(default_factory=list)  # internal: resolved at scan time
     applying: bool = False  # an apply is running right now
     applied: bool = False  # an apply already completed; never run a second one
+    eta: EtaEstimator = field(default_factory=EtaEstimator)
 
 
 JOBS: dict[str, Job] = {}
 JOBS_LOCK = threading.Lock()
+
+_STORE: Store | None = None
+_STORE_LOCK = threading.Lock()
+_CACHE_DIR_OVERRIDE: str | None = None  # set by --cache-dir
+
+
+def _get_store() -> Store:
+    """Return the shared singleton Store used by /api/settings and /api/cache/*.
+
+    Never used by a scan job's cache -- see _open_job_store() below. This
+    singleton is closed exactly once, at server shutdown (see main()), so it
+    is always safe to keep reusing across requests.
+    """
+    global _STORE
+    with _STORE_LOCK:
+        if _STORE is None:
+            db_path = os.path.join(cache_dir(_CACHE_DIR_OVERRIDE), "hashes.db")
+            _STORE = Store(db_path)
+        return _STORE
+
+
+def _open_job_store() -> Store:
+    """Open a fresh, private Store connection for a single scan job's cache.
+
+    Deliberately NOT the shared _get_store() singleton: handle_scan only
+    dedupes identical-config requests, so two different-config scans can run
+    concurrently, and _run_scan_job's finally always calls cache.close() (the
+    single most important line for resumability -- an aborted scan must still
+    keep everything it had already hashed). If two jobs shared one Store, the
+    first job to finish would close the connection the other is still using
+    mid-compare(), crashing it and, worse, discarding its not-yet-flushed
+    hashes when its own finally then tried to flush through the dead
+    connection. Giving every job its own connection to the same db file makes
+    that impossible; WAL mode (see store.py) is exactly what makes multiple
+    independent connections to one file safe to use at once.
+    """
+    db_path = os.path.join(cache_dir(_CACHE_DIR_OVERRIDE), "hashes.db")
+    return Store(db_path)
 
 
 class Busy(Exception):
@@ -79,8 +129,11 @@ def _single_flight(key: str):
 # --------------------------------------------------------------------------
 
 
-def _run_scan_job(job_id: str, a: str, b: str, rules: dict[str, str]) -> None:
+def _run_scan_job(
+    job_id: str, a: str, b: str, rules: dict[str, str], io_workers: int, use_cache: bool
+) -> None:
     job = JOBS[job_id]
+    cache: HashCache | None = None
     try:
         skip_abs_paths = {path for path, action in rules.items() if action in ("skip", "trash")}
 
@@ -88,20 +141,37 @@ def _run_scan_job(job_id: str, a: str, b: str, rules: dict[str, str]) -> None:
         trash_dirs = [nd for nd in noisy_a if rules.get(nd.abs_path) == "trash"]
         job.trash_dirs = trash_dirs
 
+        def scan_progress_cb(files_found: int, current_path: str) -> None:
+            job.processed = files_found
+            job.current_path = current_path
+
         job.phase = "scanning_a"
-        entries_a, errors_a = scan(a, skip_abs_paths)
+        entries_a, errors_a = scan(a, skip_abs_paths, progress=scan_progress_cb)
 
         job.phase = "scanning_b"
-        entries_b, errors_b = scan(b, skip_abs_paths)
+        job.processed = 0
+        entries_b, errors_b = scan(b, skip_abs_paths, progress=scan_progress_cb)
 
         job.phase = "comparing"
+        job.processed = 0
+        job.total = 0
 
-        def progress_cb(processed: int, total: int) -> None:
-            job.processed = processed
-            job.total = total
+        cache = PersistentHashCache(_open_job_store()) if use_cache else HashCache()
 
-        cache = HashCache()
-        report = compare(entries_a, entries_b, cache, progress=progress_cb)
+        def compare_progress_cb(sp) -> None:
+            job.processed = sp.buckets_done
+            job.total = sp.buckets_total
+            job.bytes_resolved = sp.bytes_resolved
+            job.bytes_to_resolve = sp.bytes_to_resolve
+            job.current_path = sp.current_path
+            if isinstance(cache, PersistentHashCache):
+                job.cache_hits = cache.cache_hits
+                job.cache_misses = cache.cache_misses
+            job.eta.observe(time.monotonic(), sp.bytes_resolved)
+
+        report = compare(
+            entries_a, entries_b, cache, progress=compare_progress_cb, io_workers=io_workers
+        )
         report.errors = errors_a + errors_b + report.errors
 
         job.report = report
@@ -112,6 +182,14 @@ def _run_scan_job(job_id: str, a: str, b: str, rules: dict[str, str]) -> None:
         traceback.print_exc(file=sys.stderr)
         job.status = "error"
         job.error = str(exc)
+    finally:
+        # The single most important line for resumability: an aborted scan
+        # must still keep everything it had already hashed. cache wraps this
+        # job's own private Store (see _open_job_store()), so closing it here
+        # only flushes and closes this job's connection -- never one shared
+        # with another still-running job or with /api/settings, /api/cache/*.
+        if cache is not None:
+            cache.close()
 
 
 # --------------------------------------------------------------------------
@@ -120,13 +198,15 @@ def _run_scan_job(job_id: str, a: str, b: str, rules: dict[str, str]) -> None:
 
 
 def _drive_shortcuts() -> list[dict]:
-    """List Windows drives currently mounted under /mnt (WSL).
+    """List available drives: A:-Z: on native Windows, or mounted /mnt/<letter> on WSL/Linux."""
+    if os.name == "nt":
+        shortcuts = []
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            root = f"{letter}:\\"
+            if os.path.exists(root):
+                shortcuts.append({"name": f"Drive {letter}:", "path": root})
+        return shortcuts
 
-    os.path.ismount() filters out stale mount points -- an empty /mnt/d left
-    behind by a previous session is a directory, but not a mounted drive.
-    Requiring a single-letter name excludes WSL's own /mnt/wsl and /mnt/wslg.
-    Returns an empty list on any error, so the picker still works off WSL.
-    """
     shortcuts: list[dict] = []
     try:
         names = sorted(os.listdir("/mnt"))
@@ -203,13 +283,18 @@ def handle_scan(body: dict) -> tuple[int, dict]:
     a = body.get("a", "")
     b = body.get("b", "")
     rules = body.get("rules") or {}
+    io_workers = body.get("io_workers", 1)
+    use_cache = body.get("use_cache", True)
+
+    if not isinstance(io_workers, int) or isinstance(io_workers, bool) or not (1 <= io_workers <= 32):
+        return 400, {"error": "io_workers must be an integer between 1 and 32"}
 
     try:
         validate_sources(a, b)
     except ValueError as exc:
         return 400, {"error": str(exc)}
 
-    config = {"a": a, "b": b, "rules": rules}
+    config = {"a": a, "b": b, "rules": rules, "io_workers": io_workers, "use_cache": use_cache}
 
     with JOBS_LOCK:
         # A repeated click must not spawn a second scanning thread over the same
@@ -222,7 +307,9 @@ def handle_scan(body: dict) -> tuple[int, dict]:
         job_id = uuid.uuid4().hex
         JOBS[job_id] = Job(id=job_id, config=config)
 
-    thread = threading.Thread(target=_run_scan_job, args=(job_id, a, b, rules), daemon=True)
+    thread = threading.Thread(
+        target=_run_scan_job, args=(job_id, a, b, rules, io_workers, use_cache), daemon=True
+    )
     thread.start()
 
     return 200, {"job_id": job_id}
@@ -232,12 +319,28 @@ def handle_progress(job_id: str) -> tuple[int, dict]:
     job = JOBS.get(job_id)
     if job is None:
         return 404, {"error": f"unknown job: {job_id}"}
+
+    now = time.monotonic()
+    eta_seconds = None
+    throughput_bps = None
+    if job.phase == "comparing":
+        eta_seconds = job.eta.seconds_remaining(now, job.bytes_to_resolve)
+        throughput_bps = job.eta.throughput_bps(now)
+
     return 200, {
         "status": job.status,
         "phase": job.phase,
         "processed": job.processed,
         "total": job.total,
         "error": job.error,
+        "bytes_resolved": job.bytes_resolved,
+        "bytes_to_resolve": job.bytes_to_resolve,
+        "throughput_bps": throughput_bps,
+        "eta_seconds": eta_seconds,
+        "elapsed_seconds": now - job.started_at,
+        "current_path": job.current_path,
+        "cache_hits": job.cache_hits,
+        "cache_misses": job.cache_misses,
     }
 
 
@@ -335,11 +438,56 @@ def handle_apply(body: dict) -> tuple[int, dict]:
     }
 
 
+DEFAULT_SETTINGS = {"last_paths": None, "io_workers": 1, "use_cache": True}
+SETTINGS_KEYS = set(DEFAULT_SETTINGS)
+
+
+def handle_settings_get() -> tuple[int, dict]:
+    store = _get_store()
+    result = dict(DEFAULT_SETTINGS)
+    for key in SETTINGS_KEYS:
+        value = store.get_setting(key)
+        if value is not None:
+            result[key] = value
+    return 200, result
+
+
+def handle_settings_post(body: dict) -> tuple[int, dict]:
+    unknown = set(body) - SETTINGS_KEYS
+    if unknown:
+        return 400, {"error": f"unknown settings key(s): {', '.join(sorted(unknown))}"}
+    store = _get_store()
+    for key, value in body.items():
+        store.set_setting(key, value)
+    return 200, {}
+
+
+def handle_volumes(body: dict) -> tuple[int, dict]:
+    paths = [p for p in (body.get("a"), body.get("b")) if p]
+    if not paths:
+        return 400, {"error": "at least one path is required"}
+    volumes = [detect(p) for p in paths]
+    return 200, {"volumes": [asdict(v) for v in volumes], "suggested_workers": combine(volumes)}
+
+
+def handle_cache_stats() -> tuple[int, dict]:
+    store = _get_store()
+    return 200, {"row_count": store.row_count(), "db_size_bytes": store.db_size_bytes()}
+
+
+def handle_cache_clear(body: dict) -> tuple[int, dict]:
+    _get_store().clear_hashes()
+    return 200, {}
+
+
 POST_ROUTES = {
     "/api/browse": handle_browse,
     "/api/prescan": handle_prescan,
     "/api/scan": handle_scan,
     "/api/apply": handle_apply,
+    "/api/settings": handle_settings_post,
+    "/api/volumes": handle_volumes,
+    "/api/cache/clear": handle_cache_clear,
 }
 
 
@@ -369,6 +517,10 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/report":
             job_id = parse_qs(parsed.query).get("job", [""])[0]
             self._send_json(*handle_report(job_id))
+        elif parsed.path == "/api/settings":
+            self._send_json(*handle_settings_get())
+        elif parsed.path == "/api/cache/stats":
+            self._send_json(*handle_cache_stats())
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -443,12 +595,35 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _open_browser(url: str) -> None:
-    for cmd in (["wslview", url], ["xdg-open", url], ["explorer.exe", url]):
-        try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Open `url` in the default browser, never failing the server if it can't.
+
+    webbrowser is deliberately not used first on WSL: it would try to launch
+    a Linux browser that usually isn't installed there.
+    """
+    if is_wsl():
+        for cmd in (["wslview", url], ["explorer.exe", url]):
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except OSError:
+                continue
+        print(f"Could not open a browser automatically. Open {url} manually.")
+        return
+
+    if sys.platform == "darwin" or os.name == "nt":
+        if webbrowser.open(url):
             return
-        except OSError:
-            continue
+        print(f"Could not open a browser automatically. Open {url} manually.")
+        return
+
+    # Native Linux
+    try:
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    except OSError:
+        pass
+    if webbrowser.open(url):
+        return
     print(f"Could not open a browser automatically. Open {url} manually.")
 
 
@@ -458,7 +633,15 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="override the persistent hash cache location (mainly for tests)",
+    )
     args = parser.parse_args()
+
+    global _CACHE_DIR_OVERRIDE
+    _CACHE_DIR_OVERRIDE = args.cache_dir
 
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
@@ -478,6 +661,8 @@ def main() -> None:
         pass
     finally:
         httpd.server_close()
+        if _STORE is not None:
+            _STORE.close()
 
 
 if __name__ == "__main__":

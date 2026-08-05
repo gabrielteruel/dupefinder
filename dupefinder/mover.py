@@ -30,8 +30,8 @@ def validate_sources(a: str, b: str) -> None:
     if not os.path.isdir(b):
         raise ValueError(f"folder B does not exist or is not a directory: {b}")
 
-    real_a = os.path.realpath(a)
-    real_b = os.path.realpath(b)
+    real_a = os.path.normcase(os.path.realpath(a))
+    real_b = os.path.normcase(os.path.realpath(b))
 
     if real_a == real_b:
         raise ValueError("folder A and folder B must be different")
@@ -49,9 +49,9 @@ def validate_paths(a: str, b: str, dest: str) -> None:
     """
     validate_sources(a, b)
 
-    real_a = os.path.realpath(a)
-    real_b = os.path.realpath(b)
-    real_dest = os.path.realpath(dest)
+    real_a = os.path.normcase(os.path.realpath(a))
+    real_b = os.path.normcase(os.path.realpath(b))
+    real_dest = os.path.normcase(os.path.realpath(dest))
 
     if real_dest == real_a or real_dest == real_b:
         raise ValueError("the destination folder must be different from folder A and folder B")
@@ -64,7 +64,13 @@ def validate_paths(a: str, b: str, dest: str) -> None:
 def _is_inside(child: str, parent: str) -> bool:
     if child == parent:
         return False
-    return os.path.commonpath([child, parent]) == parent
+    try:
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:
+        # Raised on Windows when the two paths are on different drives
+        # (os.path.commonpath(["C:\\x", "D:\\y"])) -- different drives can
+        # never be "inside" one another.
+        return False
 
 
 def apply_moves(entries: list[tuple[str, str]], dest: str, cache: HashCache) -> MoveResult:

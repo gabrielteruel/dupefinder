@@ -4,6 +4,42 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-08-04
+
+### Added
+
+- Persistent SQLite hash cache with automatic resume: an interrupted scan
+  picks up where it left off, and re-scanning an unchanged drive skips every
+  file that hasn't changed. Cached hashes are keyed by path, size and
+  modification time, and stored outside any scanned volume.
+- Disk-type detection (`dupefinder/diskinfo.py`) with a suggested `io_workers`
+  value surfaced in a new pre-scan "Performance" panel.
+- Opt-in `io_workers` concurrency for the hashing stages, via a
+  `ThreadPoolExecutor`. Default remains 1 (no behavior change).
+- Sampled-region pre-filter for files above 8 MiB: files that share a size and
+  a 64 KiB prefix are now discriminated by two extra seeks (middle and final
+  64 KiB) before any full read. Purely eliminating — identity is still decided
+  by the full SHA-256, never by a sample.
+- Byte-based progress during the comparing phase, showing bytes processed,
+  bytes remaining, total bytes to compare, throughput and an estimated time
+  remaining, computed server-side with a rolling-window throughput estimate.
+- macOS and native Windows support: browser opening, drive listing,
+  `run.cmd`.
+- `POST /api/volumes`, `GET`/`POST /api/settings`, `GET /api/cache/stats`,
+  `POST /api/cache/clear` endpoints.
+
+### Fixed
+
+- `ValueError` crash comparing paths across Windows drives
+  (`os.path.commonpath` on `C:\` vs `D:\`).
+- Case-insensitive path containment checks on Windows.
+- `HashCache` was not safe for concurrent access; the counters and digest
+  dicts are now guarded by a lock that never blocks the actual file reads.
+- The report table no longer freezes the browser on a large scan. Only the
+  visible rows are rendered, so a report with 100,000+ files stays responsive.
+- Native `alert()`/`confirm()` popups replaced with in-page dialogs that match
+  the rest of the UI and support Escape and Enter.
+
 ## [0.3.0] - 2026-08-04
 
 ### Fixed

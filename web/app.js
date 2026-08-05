@@ -19,8 +19,15 @@ const state = {
   sortDir: "asc",
   filterText: "",
   statusFilters: new Set(["exclusive", "internal_copy", "unreadable"]),
+  filteredRows: [],
+  scrollPending: false,
   busy: false, // a request-driven action is running
   browseBusy: false, // a folder-browse request is running
+  ioWorkers: 1,
+  useCache: true,
+  workersManuallySet: false,
+  cacheHits: 0,
+  cacheMisses: 0,
 };
 
 const pathInputs = {
@@ -52,6 +59,19 @@ function formatBytes(n) {
     unitIndex += 1;
   }
   return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatDuration(seconds) {
+  if (seconds < 60) return "less than a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `about ${minutes} minute${minutes !== 1 ? "s" : ""}`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes === 0 ? `about ${hours} h` : `about ${hours} h ${remMinutes} min`;
+}
+
+function formatThroughput(bps) {
+  return `${formatBytes(bps)}/s`;
 }
 
 function statusLabel(status) {
@@ -155,6 +175,7 @@ btnContinueSelect.addEventListener("click", () => {
       state.rules = {};
       updatePathSummary();
       showScreen("screen-prescan");
+      loadVolumeInfo();
 
       const hasNoisy = state.noisy.length > 0;
       document.getElementById("prescan-controls").hidden = !hasNoisy;
@@ -172,6 +193,55 @@ btnContinueSelect.addEventListener("click", () => {
     }
   });
 });
+
+async function loadSettings() {
+  try {
+    const data = await api("/api/settings", "GET");
+    if (data.last_paths) {
+      state.paths = { ...data.last_paths };
+      pathInputs.a.value = state.paths.a || "";
+      pathInputs.b.value = state.paths.b || "";
+      pathInputs.dest.value = state.paths.dest || "";
+      validateSelectScreen();
+    }
+    state.ioWorkers = data.io_workers || 1;
+    state.useCache = data.use_cache !== false;
+    document.getElementById("input-io-workers").value = state.ioWorkers;
+    document.getElementById("input-use-cache").checked = state.useCache;
+  } catch (err) {
+    // Settings are a convenience; failure must never block the app.
+  }
+}
+
+async function loadCacheStats() {
+  try {
+    const data = await api("/api/cache/stats", "GET");
+    document.getElementById("cache-settings-summary").textContent =
+      `Cached hashes: ${data.row_count.toLocaleString()} files, ${formatBytes(data.db_size_bytes)}`;
+  } catch (err) {
+    document.getElementById("cache-settings-summary").textContent = "";
+  }
+}
+
+document.getElementById("input-io-workers").addEventListener("input", (e) => {
+  state.workersManuallySet = true;
+  state.ioWorkers = Math.max(1, Math.min(32, Number(e.target.value) || 1));
+});
+
+document.getElementById("input-use-cache").addEventListener("change", (e) => {
+  state.useCache = e.target.checked;
+});
+
+document.getElementById("btn-clear-cache").addEventListener("click", () => {
+  const btn = document.getElementById("btn-clear-cache");
+  runAction(btn, "Clearing…", async () => {
+    await api("/api/cache/clear", "POST", {});
+    await loadCacheStats();
+  });
+});
+
+loadSettings();
+loadCacheStats();
 
 // ---------------------------------------------------------------------
 // Folder browse modal
@@ -242,8 +312,69 @@ document.getElementById("btn-browse-select").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------
+// Confirmation dialog (replaces window.confirm)
+// ---------------------------------------------------------------------
+
+/** Promise-based replacement for window.confirm, styled like the rest of the app. */
+function confirmDialog({ title, message, confirmLabel = "Confirm" }) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById("confirm-modal");
+    const okBtn = document.getElementById("btn-confirm-ok");
+    const cancelBtn = document.getElementById("btn-confirm-cancel");
+
+    document.getElementById("confirm-title").textContent = title;
+    document.getElementById("confirm-message").textContent = message;
+    okBtn.textContent = confirmLabel;
+    modal.hidden = false;
+    okBtn.focus();
+
+    function cleanup(result) {
+      modal.hidden = true;
+      okBtn.removeEventListener("click", onOk);
+      cancelBtn.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    }
+    function onOk() {
+      cleanup(true);
+    }
+    function onCancel() {
+      cleanup(false);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") cleanup(false);
+      if (e.key === "Enter") cleanup(true);
+    }
+
+    okBtn.addEventListener("click", onOk);
+    cancelBtn.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey);
+  });
+}
+
+// ---------------------------------------------------------------------
 // Screen 2: noisy-directory pre-scan + scan progress
 // ---------------------------------------------------------------------
+
+async function loadVolumeInfo() {
+  const container = document.getElementById("volume-info");
+  container.innerHTML = `<p class="screen-hint">Detecting disk types…</p>`;
+  try {
+    const data = await api("/api/volumes", "POST", { a: state.paths.a, b: state.paths.b });
+    container.innerHTML = data.volumes
+      .map(
+        (v, i) =>
+          `<p class="volume-line">Folder ${i === 0 ? "A" : "B"} — ${escapeHtml(v.path)} — ${escapeHtml(v.label)}</p>`
+      )
+      .join("");
+    if (!state.workersManuallySet) {
+      state.ioWorkers = data.suggested_workers;
+      document.getElementById("input-io-workers").value = data.suggested_workers;
+    }
+  } catch (err) {
+    container.innerHTML = `<p class="screen-hint">Could not detect disk types.</p>`;
+  }
+}
 
 function renderPrescanTable() {
   const tbody = document.getElementById("prescan-tbody");
@@ -303,12 +434,21 @@ async function startScan() {
   const errorEl = document.getElementById("prescan-error");
   errorEl.hidden = true;
   document.getElementById("scan-progress").hidden = false;
+  document.getElementById("scan-progress-stall").hidden = true;
+
+  await api("/api/settings", "POST", {
+    last_paths: { ...state.paths },
+    io_workers: state.ioWorkers,
+    use_cache: state.useCache,
+  }).catch(() => {});
 
   try {
     const data = await api("/api/scan", "POST", {
       a: state.paths.a,
       b: state.paths.b,
       rules: state.rules,
+      io_workers: state.ioWorkers,
+      use_cache: state.useCache,
     });
     state.jobId = data.job_id;
     // Awaited so the caller stays "busy" for the whole scan, not just the POST.
@@ -323,11 +463,13 @@ async function startScan() {
 function phaseLabel(phase, processed, total) {
   switch (phase) {
     case "scanning_a":
-      return "Scanning folder A…";
+      return `Scanning folder A… (${processed.toLocaleString()} files found)`;
     case "scanning_b":
-      return "Scanning folder B…";
+      return `Scanning folder B… (${processed.toLocaleString()} files found)`;
     case "comparing":
-      return total > 0 ? `Comparing files… (${processed}/${total})` : "Comparing files…";
+      return total > 0
+        ? `Comparing files… (${processed.toLocaleString()}/${total.toLocaleString()} size groups)`
+        : "Comparing files…";
     case "done":
       return "Done.";
     default:
@@ -335,16 +477,71 @@ function phaseLabel(phase, processed, total) {
   }
 }
 
+/**
+ * Fill the progress stats grid.
+ *
+ * The byte figures are only meaningful once bucketing has produced a total,
+ * which happens at the start of the comparing phase. During the two walk
+ * phases the total is genuinely unknowable, so those cells show an em dash
+ * rather than a misleading zero.
+ */
+function renderProgressStats(data) {
+  const set = (id, value) => {
+    document.getElementById(id).textContent = value;
+  };
+  const comparing = data.phase === "comparing" && data.bytes_to_resolve > 0;
+
+  if (comparing) {
+    const remaining = Math.max(0, data.bytes_to_resolve - data.bytes_resolved);
+    const pct = Math.min(100, Math.round((data.bytes_resolved / data.bytes_to_resolve) * 100));
+    set("stat-processed", `${formatBytes(data.bytes_resolved)} (${pct}%)`);
+    set("stat-remaining", formatBytes(remaining));
+    set("stat-total", formatBytes(data.bytes_to_resolve));
+    set("stat-speed", data.throughput_bps ? formatThroughput(data.throughput_bps) : "measuring…");
+    set(
+      "stat-eta",
+      data.eta_seconds !== null && data.eta_seconds !== undefined
+        ? formatDuration(data.eta_seconds)
+        : "estimating…"
+    );
+  } else {
+    set("stat-processed", "—");
+    set("stat-remaining", "—");
+    set("stat-total", "—");
+    set("stat-speed", "—");
+    set("stat-eta", "—"); // never invent an estimate during the walk phases
+  }
+
+  set("stat-elapsed", formatElapsed(data.elapsed_seconds));
+
+  const current = document.getElementById("scan-progress-current");
+  current.textContent = data.current_path ? `Reading: ${data.current_path}` : "";
+  current.title = data.current_path || "";
+}
+
+/** Elapsed time is a fact, not an estimate, so it is shown precisely. */
+function formatElapsed(seconds) {
+  const total = Math.floor(seconds || 0);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 /** Poll until the scan finishes. Resolves once the report is loaded or it fails. */
 function pollProgress() {
   const label = document.getElementById("scan-progress-label");
   const fill = document.getElementById("scan-progress-fill");
+  const stallWarning = document.getElementById("scan-progress-stall");
   const errorEl = document.getElementById("prescan-error");
 
   return new Promise((resolve) => {
     // A single in-flight poll at a time: a slow response must not pile up
     // requests behind it.
     let polling = false;
+    let lastSignature = null;
+    let lastChangeAt = Date.now();
 
     const interval = setInterval(async () => {
       if (polling) return;
@@ -353,16 +550,38 @@ function pollProgress() {
       try {
         const data = await api(`/api/progress?job=${encodeURIComponent(state.jobId)}`, "GET");
         label.textContent = phaseLabel(data.phase, data.processed, data.total);
+        renderProgressStats(data);
 
-        if (data.total > 0) {
+        // During comparing, drive the bar by bytes -- it matches the numbers
+        // in the stats grid, and a bucket count would disagree with them.
+        if (data.phase === "comparing" && data.bytes_to_resolve > 0) {
+          fill.classList.remove("indeterminate");
+          fill.style.width = `${Math.min(
+            100,
+            Math.round((data.bytes_resolved / data.bytes_to_resolve) * 100)
+          )}%`;
+        } else if (data.total > 0) {
           fill.classList.remove("indeterminate");
           fill.style.width = `${Math.min(100, Math.round((data.processed / data.total) * 100))}%`;
         } else {
           fill.classList.add("indeterminate");
         }
 
+        // A signature of "is anything moving" -- distinguishes slow from
+        // stuck without guessing at a specific number the server didn't send.
+        const signature = `${data.processed}|${data.bytes_resolved}|${data.current_path}`;
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          lastChangeAt = Date.now();
+          stallWarning.hidden = true;
+        } else if (Date.now() - lastChangeAt > 30000) {
+          stallWarning.hidden = false;
+        }
+
         if (data.status === "done") {
           clearInterval(interval);
+          state.cacheHits = data.cache_hits;
+          state.cacheMisses = data.cache_misses;
           await loadReport();
           resolve();
         } else if (data.status === "error") {
@@ -394,17 +613,27 @@ async function loadReport() {
   state.stats = data.stats;
   state.selected = new Set(state.rows.filter((r) => r.status === "exclusive").map((r) => r.id));
 
+  const cacheSummary = document.getElementById("cache-hit-summary");
+  if (state.useCache && (state.cacheHits || state.cacheMisses)) {
+    cacheSummary.hidden = false;
+    cacheSummary.textContent = `${state.cacheHits} files reused from cache, ${state.cacheMisses} newly hashed.`;
+  } else {
+    cacheSummary.hidden = true;
+  }
+
+  renderReportTable();
   renderReportSummary();
   renderErrorsPanel();
-  renderReportTable();
   showScreen("screen-report");
 }
 
 function renderReportSummary() {
   const presentInB = state.rows.filter((r) => r.status === "present_in_b").length;
+  const shown = state.filteredRows.length;
   document.getElementById("report-summary").textContent =
-    `${state.rows.length} files scanned in folder A. ` +
-    `${presentInB} already exist in folder B (hidden from this table).`;
+    `${state.rows.length.toLocaleString()} files scanned in folder A. ` +
+    `${presentInB.toLocaleString()} already exist in folder B (hidden from this table). ` +
+    `Showing ${shown.toLocaleString()}.`;
 }
 
 function renderErrorsPanel() {
@@ -462,22 +691,72 @@ function rowHtml(row) {
   `;
 }
 
+// Must match the `height` declared for #report-table td in style.css.
+const ROW_HEIGHT = 36;
+const BUFFER_ROWS = 12; // rendered above and below the viewport, to absorb fast scrolling
+
 function renderReportTable() {
-  const tbody = document.getElementById("report-tbody");
-  const filtered = getFilteredSortedRows();
-  tbody.innerHTML = filtered.map(rowHtml).join("");
-
-  tbody.querySelectorAll("input[type=checkbox][data-row-id]").forEach((cb) => {
-    cb.addEventListener("change", () => {
-      const id = cb.dataset.rowId;
-      if (cb.checked) state.selected.add(id);
-      else state.selected.delete(id);
-      updateSelectionSummary();
-    });
-  });
-
+  state.filteredRows = getFilteredSortedRows();
+  const wrap = document.getElementById("report-table-wrap");
+  wrap.scrollTop = 0;
+  renderVisibleRows();
   updateSelectionSummary();
 }
+
+/**
+ * Render only the rows currently in view, padded above and below by spacer
+ * rows that reproduce the full scroll height.
+ *
+ * Without this, a report of 100k rows builds ~400k DOM nodes in one
+ * synchronous pass and freezes the tab.
+ */
+function renderVisibleRows() {
+  const wrap = document.getElementById("report-table-wrap");
+  const tbody = document.getElementById("report-tbody");
+  const rows = state.filteredRows;
+
+  const viewportHeight = wrap.clientHeight || 600;
+  const first = Math.max(0, Math.floor(wrap.scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
+  const visibleCount = Math.ceil(viewportHeight / ROW_HEIGHT) + BUFFER_ROWS * 2;
+  const last = Math.min(rows.length, first + visibleCount);
+
+  const topPad = first * ROW_HEIGHT;
+  const bottomPad = Math.max(0, (rows.length - last) * ROW_HEIGHT);
+
+  const html = [];
+  if (topPad > 0) {
+    html.push(`<tr class="spacer"><td colspan="4" style="height:${topPad}px"></td></tr>`);
+  }
+  for (let i = first; i < last; i += 1) {
+    html.push(rowHtml(rows[i]));
+  }
+  if (bottomPad > 0) {
+    html.push(`<tr class="spacer"><td colspan="4" style="height:${bottomPad}px"></td></tr>`);
+  }
+  tbody.innerHTML = html.join("");
+}
+
+// One delegated listener on the tbody, registered once. Rows are recreated on
+// every scroll, so per-row listeners would leak and be rebound constantly.
+document.getElementById("report-tbody").addEventListener("change", (e) => {
+  const cb = e.target.closest("input[type=checkbox][data-row-id]");
+  if (!cb) return;
+  const id = cb.dataset.rowId;
+  if (cb.checked) state.selected.add(id);
+  else state.selected.delete(id);
+  updateSelectionSummary();
+});
+
+// Re-render on scroll, throttled to one frame so a fast flick doesn't queue
+// dozens of renders.
+document.getElementById("report-table-wrap").addEventListener("scroll", () => {
+  if (state.scrollPending) return;
+  state.scrollPending = true;
+  requestAnimationFrame(() => {
+    state.scrollPending = false;
+    renderVisibleRows();
+  });
+});
 
 function updateSelectionSummary() {
   const selectedRows = state.rows.filter((r) => state.selected.has(r.id));
@@ -509,35 +788,46 @@ document.querySelectorAll("[data-status-filter]").forEach((cb) => {
   });
 });
 
+let filterTimer = null;
 document.getElementById("report-filter").addEventListener("input", (e) => {
   state.filterText = e.target.value;
-  renderReportTable();
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(renderReportTable, 150);
 });
 
 document.getElementById("btn-select-all").addEventListener("click", () => {
-  getFilteredSortedRows().forEach((r) => state.selected.add(r.id));
-  renderReportTable();
+  state.filteredRows.forEach((r) => state.selected.add(r.id));
+  renderVisibleRows();
+  updateSelectionSummary();
 });
 
 document.getElementById("btn-select-none").addEventListener("click", () => {
-  getFilteredSortedRows().forEach((r) => state.selected.delete(r.id));
-  renderReportTable();
+  state.filteredRows.forEach((r) => state.selected.delete(r.id));
+  renderVisibleRows();
+  updateSelectionSummary();
 });
 
 const btnApply = document.getElementById("btn-apply");
 
-btnApply.addEventListener("click", () => {
+btnApply.addEventListener("click", async () => {
+  const errorEl = document.getElementById("report-error");
+  errorEl.hidden = true;
+
   const selectedRows = state.rows.filter((r) => state.selected.has(r.id));
   if (selectedRows.length === 0) {
-    alert("Select at least one file to move.");
+    errorEl.hidden = false;
+    errorEl.textContent = "Select at least one file to move.";
     return;
   }
 
   const totalBytes = selectedRows.reduce((sum, r) => sum + r.size, 0);
-  const confirmed = confirm(
-    `Move ${selectedRows.length} file(s) (${formatBytes(totalBytes)}) to:\n${state.paths.dest}\n\n` +
-      "This cannot be undone from this UI. Continue?"
-  );
+  const confirmed = await confirmDialog({
+    title: "Move files?",
+    message:
+      `${selectedRows.length.toLocaleString()} file(s), ${formatBytes(totalBytes)} will be moved to:\n` +
+      `${state.paths.dest}\n\nThis cannot be undone from this UI.`,
+    confirmLabel: "Move files",
+  });
   if (!confirmed) return;
 
   runAction(btnApply, "Moving files…", async () => {
@@ -550,7 +840,8 @@ btnApply.addEventListener("click", () => {
       renderResult(result);
       showScreen("screen-result");
     } catch (err) {
-      alert(`Failed to move files: ${err.message}`);
+      errorEl.hidden = false;
+      errorEl.textContent = `Failed to move files: ${err.message}`;
     }
   });
 });
@@ -600,6 +891,7 @@ function resetState() {
   state.sortKey = "rel_path";
   state.sortDir = "asc";
   state.statusFilters = new Set(["exclusive", "internal_copy", "unreadable"]);
+  state.filteredRows = [];
 
   Object.values(pathInputs).forEach((input) => {
     input.value = "";
@@ -611,5 +903,6 @@ function resetState() {
   document.getElementById("btn-continue-select").disabled = true;
   document.getElementById("btn-start-scan").disabled = false;
   document.getElementById("scan-progress").hidden = true;
+  document.getElementById("report-error").hidden = true;
   updatePathSummary();
 }
