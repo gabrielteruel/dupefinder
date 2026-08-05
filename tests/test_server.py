@@ -1,6 +1,7 @@
 """Tests for dupefinder.server."""
 
 import os
+import threading
 import time
 import unittest
 from unittest import mock
@@ -326,26 +327,6 @@ class ProgressEtaTests(JobsTestCase):
         self.assertIsInstance(payload["eta_seconds"], float)
 
 
-class StoreReopensAfterCloseTests(CacheTestCase):
-    """_run_scan_job's finally calls cache.close(), which closes the shared
-    singleton's connection (see the comment in _run_scan_job). The very next
-    request that needs the store -- another scan, or /api/settings, or
-    /api/cache/* -- must not crash with "Cannot operate on a closed database";
-    _get_store() must transparently hand back a working connection.
-    """
-
-    def test_get_store_reopens_a_connection_closed_by_a_finished_job(self) -> None:
-        store = server._get_store()
-        store.put_hash(HashRow(path="/x", size=1, mtime_ns=1, partial=None, full="h"))
-        store.flush()
-        store.close()  # simulates _run_scan_job's finally: cache.close()
-
-        reopened = server._get_store()
-
-        self.assertIsNot(reopened, store)
-        self.assertEqual(reopened.row_count(), 1)
-
-
 class CacheCloseOnFailureTests(JobsTestCase):
     def test_cache_is_closed_even_when_compare_raises(self) -> None:
         build_tree(self.root, {"a/f.txt": b"1", "b/g.txt": b"2"})
@@ -358,12 +339,107 @@ class CacheCloseOnFailureTests(JobsTestCase):
         with (
             mock.patch("dupefinder.server.compare", side_effect=RuntimeError("boom")),
             mock.patch("dupefinder.server.PersistentHashCache.close") as mock_close,
-            mock.patch("dupefinder.server._get_store", return_value=mock.Mock()),
+            mock.patch("dupefinder.server._open_job_store", return_value=mock.Mock()),
         ):
             _run_scan_job("job-x", a, b, {}, io_workers=1, use_cache=True)
 
         self.assertEqual(JOBS["job-x"].status, "error")
         mock_close.assert_called_once()
+
+
+class ConcurrentJobCachesTests(CacheTestCase):
+    """Two different-config scans are allowed to run at the same time (only
+    identical-config requests are deduped -- see ScanDeduplicationTests), and
+    each job's finally always calls cache.close(). If jobs shared one Store,
+    the first job to finish would close the connection the other is still
+    hashing through. _open_job_store() gives every job its own connection to
+    the same db file instead, so this must be impossible.
+    """
+
+    def test_open_job_store_returns_independent_connections(self) -> None:
+        store_a = server._open_job_store()
+        store_b = server._open_job_store()
+
+        self.assertIsNot(store_a, store_b)
+
+    def test_closing_one_jobs_cache_does_not_break_another_still_open_one(self) -> None:
+        cache_a = PersistentHashCache(server._open_job_store())
+        cache_b = PersistentHashCache(server._open_job_store())
+
+        cache_a.close()  # simulates job A's finally: cache.close()
+
+        # Job B, still running, must be able to keep hashing through its own,
+        # separate connection -- and its result must actually persist.
+        path = os.path.join(self.root, "still_running.txt")
+        with open(path, "wb") as f:
+            f.write(b"still hashing")
+        digest = cache_b.partial(path)  # must not raise
+        self.assertTrue(digest)
+        cache_b.close()
+
+        reopened = server._open_job_store()
+        row = reopened.get_hash(path, os.stat(path).st_size, os.stat(path).st_mtime_ns)
+        self.assertIsNotNone(row)
+        reopened.close()
+
+
+class ConcurrentScanJobsCacheTests(CacheTestCase):
+    """Full-integration version of ConcurrentJobCachesTests: two real
+    _run_scan_job calls, run on separate threads, deliberately overlapped so
+    that job A finishes (and closes its own cache) while job B is still
+    inside compare() using its own. Ordering is forced with threading.Event
+    rather than sleep(), so this is not timing-dependent/flaky.
+    """
+
+    def test_job_a_finishing_does_not_break_a_still_running_job_b(self) -> None:
+        build_tree(
+            self.root,
+            {
+                "a1/f.txt": b"1",
+                "b1/g.txt": b"2",
+                "a2/f.txt": b"3",
+                "b2/g.txt": b"4",
+            },
+        )
+        a1, b1 = os.path.join(self.root, "a1"), os.path.join(self.root, "b1")
+        a2, b2 = os.path.join(self.root, "a2"), os.path.join(self.root, "b2")
+
+        b_entered_compare = threading.Event()
+        a_finished = threading.Event()
+        real_compare = server.compare
+
+        def fake_compare(entries_a, entries_b, cache, **kwargs):
+            paths = [e.abs_path for e in entries_a] + [e.abs_path for e in entries_b]
+            if any(a2 in p or b2 in p for p in paths):
+                # This is job B's call. Prove we're holding our own cache/
+                # connection already, then wait for job A to fully finish
+                # (including its finally: cache.close()) before actually
+                # hashing -- this is the exact overlap the bug depended on.
+                b_entered_compare.set()
+                a_finished.wait(timeout=5)
+            return real_compare(entries_a, entries_b, cache, **kwargs)
+
+        JOBS["job-a"] = Job(
+            id="job-a", config={"a": a1, "b": b1, "rules": {}, "io_workers": 1, "use_cache": True}
+        )
+        JOBS["job-b"] = Job(
+            id="job-b", config={"a": a2, "b": b2, "rules": {}, "io_workers": 1, "use_cache": True}
+        )
+
+        with mock.patch("dupefinder.server.compare", side_effect=fake_compare):
+            thread_b = threading.Thread(
+                target=_run_scan_job, args=("job-b", a2, b2, {}, 1, True)
+            )
+            thread_b.start()
+            self.assertTrue(b_entered_compare.wait(timeout=5), "job B never entered compare()")
+
+            _run_scan_job("job-a", a1, b1, {}, io_workers=1, use_cache=True)
+            a_finished.set()
+
+            thread_b.join(timeout=5)
+
+        self.assertEqual(JOBS["job-a"].status, "done", JOBS["job-a"].error)
+        self.assertEqual(JOBS["job-b"].status, "done", JOBS["job-b"].error)
 
 
 if __name__ == "__main__":

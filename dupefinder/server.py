@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -65,24 +64,37 @@ _CACHE_DIR_OVERRIDE: str | None = None  # set by --cache-dir
 
 
 def _get_store() -> Store:
+    """Return the shared singleton Store used by /api/settings and /api/cache/*.
+
+    Never used by a scan job's cache -- see _open_job_store() below. This
+    singleton is closed exactly once, at server shutdown (see main()), so it
+    is always safe to keep reusing across requests.
+    """
     global _STORE
     with _STORE_LOCK:
-        if _STORE is not None:
-            try:
-                _STORE.row_count()  # cheap probe: raises if the connection is closed
-            except sqlite3.ProgrammingError:
-                # _run_scan_job's finally calls cache.close() on this exact Store
-                # so an aborted scan still keeps everything it had already hashed
-                # (see the comment there). That closes this shared connection, so
-                # the next caller -- another job, or /api/settings, /api/cache/* --
-                # must get a fresh one to the same file rather than reuse the dead
-                # one. WAL mode (see store.py) makes concurrent connections to the
-                # same db file safe.
-                _STORE = None
         if _STORE is None:
             db_path = os.path.join(cache_dir(_CACHE_DIR_OVERRIDE), "hashes.db")
             _STORE = Store(db_path)
         return _STORE
+
+
+def _open_job_store() -> Store:
+    """Open a fresh, private Store connection for a single scan job's cache.
+
+    Deliberately NOT the shared _get_store() singleton: handle_scan only
+    dedupes identical-config requests, so two different-config scans can run
+    concurrently, and _run_scan_job's finally always calls cache.close() (the
+    single most important line for resumability -- an aborted scan must still
+    keep everything it had already hashed). If two jobs shared one Store, the
+    first job to finish would close the connection the other is still using
+    mid-compare(), crashing it and, worse, discarding its not-yet-flushed
+    hashes when its own finally then tried to flush through the dead
+    connection. Giving every job its own connection to the same db file makes
+    that impossible; WAL mode (see store.py) is exactly what makes multiple
+    independent connections to one file safe to use at once.
+    """
+    db_path = os.path.join(cache_dir(_CACHE_DIR_OVERRIDE), "hashes.db")
+    return Store(db_path)
 
 
 class Busy(Exception):
@@ -143,7 +155,7 @@ def _run_scan_job(
         job.processed = 0
         job.total = 0
 
-        cache = PersistentHashCache(_get_store()) if use_cache else HashCache()
+        cache = PersistentHashCache(_open_job_store()) if use_cache else HashCache()
 
         def compare_progress_cb(sp) -> None:
             job.processed = sp.buckets_done
@@ -171,11 +183,10 @@ def _run_scan_job(
         job.error = str(exc)
     finally:
         # The single most important line for resumability: an aborted scan
-        # must still keep everything it had already hashed. cache wraps the
-        # server-wide singleton store returned by _get_store(); closing it here
-        # flushes pending rows and closes that shared connection, so _get_store()
-        # transparently reopens a fresh one for whatever request comes next (see
-        # its docstring comment).
+        # must still keep everything it had already hashed. cache wraps this
+        # job's own private Store (see _open_job_store()), so closing it here
+        # only flushes and closes this job's connection -- never one shared
+        # with another still-running job or with /api/settings, /api/cache/*.
         if cache is not None:
             cache.close()
 
