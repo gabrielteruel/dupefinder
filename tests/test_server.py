@@ -1,19 +1,32 @@
 """Tests for dupefinder.server."""
 
 import os
+import time
 import unittest
 from unittest import mock
 
+from dupefinder import server
+from dupefinder.diskinfo import VolumeInfo
+from dupefinder.eta import EtaEstimator
+from dupefinder.hashing import PersistentHashCache
 from dupefinder.models import Report, ReportRow, Stats
 from dupefinder.server import (
     JOBS,
     Busy,
     Job,
     _drive_shortcuts,
+    _run_scan_job,
     _single_flight,
     handle_apply,
+    handle_cache_clear,
+    handle_cache_stats,
+    handle_progress,
     handle_scan,
+    handle_settings_get,
+    handle_settings_post,
+    handle_volumes,
 )
+from dupefinder.store import HashRow
 from tests.helpers import TempTreeCase, build_tree
 
 
@@ -105,7 +118,7 @@ class ScanDeduplicationTests(JobsTestCase):
         JOBS["existing"] = Job(
             id="existing",
             status="running",
-            config={"a": self.a, "b": self.b, "rules": {}},
+            config={"a": self.a, "b": self.b, "rules": {}, "io_workers": 1, "use_cache": True},
         )
 
         status, payload = handle_scan({"a": self.a, "b": self.b, "rules": {}})
@@ -118,7 +131,7 @@ class ScanDeduplicationTests(JobsTestCase):
         JOBS["existing"] = Job(
             id="existing",
             status="running",
-            config={"a": self.a, "b": self.b, "rules": {}},
+            config={"a": self.a, "b": self.b, "rules": {}, "io_workers": 1, "use_cache": True},
         )
 
         status, payload = handle_scan(
@@ -132,7 +145,7 @@ class ScanDeduplicationTests(JobsTestCase):
         JOBS["old"] = Job(
             id="old",
             status="done",
-            config={"a": self.a, "b": self.b, "rules": {}},
+            config={"a": self.a, "b": self.b, "rules": {}, "io_workers": 1, "use_cache": True},
         )
 
         status, payload = handle_scan({"a": self.a, "b": self.b, "rules": {}})
@@ -160,7 +173,7 @@ class ApplyOnceTests(JobsTestCase):
             id="job1",
             status="done",
             report=Report(rows=[row], errors=[], stats=Stats()),
-            config={"a": self.a, "b": self.b, "rules": {}},
+            config={"a": self.a, "b": self.b, "rules": {}, "io_workers": 1, "use_cache": True},
         )
 
     def _apply(self):
@@ -195,6 +208,162 @@ class ApplyOnceTests(JobsTestCase):
 
         self.assertFalse(JOBS["job1"].applying)
         self.assertFalse(JOBS["job1"].applied)
+
+
+class CacheTestCase(JobsTestCase):
+    """Points the persistent store at a temp dir and resets the singleton."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        server._STORE = None
+        server._CACHE_DIR_OVERRIDE = self.root
+
+    def tearDown(self) -> None:
+        if server._STORE is not None:
+            server._STORE.close()
+        server._STORE = None
+        server._CACHE_DIR_OVERRIDE = None
+        super().tearDown()
+
+
+class SettingsEndpointTests(CacheTestCase):
+    def test_settings_round_trip_through_the_api(self) -> None:
+        status, _ = handle_settings_post({"io_workers": 6, "use_cache": False})
+        self.assertEqual(status, 200)
+
+        status, payload = handle_settings_get()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["io_workers"], 6)
+        self.assertEqual(payload["use_cache"], False)
+
+    def test_defaults_when_nothing_has_been_saved_yet(self) -> None:
+        status, payload = handle_settings_get()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"last_paths": None, "io_workers": 1, "use_cache": True})
+
+    def test_unknown_key_is_rejected(self) -> None:
+        status, payload = handle_settings_post({"bogus": 1})
+        self.assertEqual(status, 400)
+        self.assertIn("bogus", payload["error"])
+
+
+class CacheStatsEndpointTests(CacheTestCase):
+    def test_stats_reflect_stored_rows(self) -> None:
+        store = server._get_store()
+        store.put_hash(HashRow(path="/x", size=1, mtime_ns=1, partial=None, full="h"))
+        store.flush()
+
+        status, payload = handle_cache_stats()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["row_count"], 1)
+        self.assertGreater(payload["db_size_bytes"], 0)
+
+    def test_clear_removes_all_rows(self) -> None:
+        store = server._get_store()
+        store.put_hash(HashRow(path="/x", size=1, mtime_ns=1, partial=None, full="h"))
+        store.flush()
+
+        status, _ = handle_cache_clear({})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(server._get_store().row_count(), 0)
+
+
+class VolumesEndpointTests(unittest.TestCase):
+    def test_returns_detected_volumes_and_combined_suggestion(self) -> None:
+        hdd = VolumeInfo(path="/a", kind="hdd", transport="usb", label="USB HDD", suggested_workers=1)
+        ssd = VolumeInfo(path="/b", kind="ssd", transport="nvme", label="SSD", suggested_workers=4)
+
+        with mock.patch("dupefinder.server.detect", side_effect=[hdd, ssd]):
+            status, payload = handle_volumes({"a": "/a", "b": "/b"})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["suggested_workers"], 1)
+        self.assertEqual(len(payload["volumes"]), 2)
+
+
+class ScanIoWorkersValidationTests(JobsTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        build_tree(self.root, {"a/f.txt": b"1", "b/g.txt": b"2"})
+        self.a = os.path.join(self.root, "a")
+        self.b = os.path.join(self.root, "b")
+
+    def test_rejects_io_workers_above_the_max(self) -> None:
+        status, payload = handle_scan({"a": self.a, "b": self.b, "io_workers": 33})
+        self.assertEqual(status, 400)
+        self.assertIn("io_workers", payload["error"])
+
+    def test_rejects_io_workers_below_one(self) -> None:
+        status, payload = handle_scan({"a": self.a, "b": self.b, "io_workers": 0})
+        self.assertEqual(status, 400)
+
+    def test_rejects_non_integer_io_workers(self) -> None:
+        status, payload = handle_scan({"a": self.a, "b": self.b, "io_workers": "four"})
+        self.assertEqual(status, 400)
+
+
+class ProgressEtaTests(JobsTestCase):
+    def test_eta_is_null_during_walk_phases(self) -> None:
+        JOBS["j"] = Job(id="j", phase="scanning_a", bytes_to_resolve=1000)
+
+        status, payload = handle_progress("j")
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(payload["eta_seconds"])
+
+    def test_eta_is_a_number_during_comparing_with_enough_history(self) -> None:
+        job = Job(id="j", phase="comparing", bytes_to_resolve=1_000_000)
+        now = time.monotonic()
+        job.eta.observe(now - 10, 0)
+        job.eta.observe(now, 500_000)
+        JOBS["j"] = job
+
+        status, payload = handle_progress("j")
+
+        self.assertEqual(status, 200)
+        self.assertIsInstance(payload["eta_seconds"], float)
+
+
+class StoreReopensAfterCloseTests(CacheTestCase):
+    """_run_scan_job's finally calls cache.close(), which closes the shared
+    singleton's connection (see the comment in _run_scan_job). The very next
+    request that needs the store -- another scan, or /api/settings, or
+    /api/cache/* -- must not crash with "Cannot operate on a closed database";
+    _get_store() must transparently hand back a working connection.
+    """
+
+    def test_get_store_reopens_a_connection_closed_by_a_finished_job(self) -> None:
+        store = server._get_store()
+        store.put_hash(HashRow(path="/x", size=1, mtime_ns=1, partial=None, full="h"))
+        store.flush()
+        store.close()  # simulates _run_scan_job's finally: cache.close()
+
+        reopened = server._get_store()
+
+        self.assertIsNot(reopened, store)
+        self.assertEqual(reopened.row_count(), 1)
+
+
+class CacheCloseOnFailureTests(JobsTestCase):
+    def test_cache_is_closed_even_when_compare_raises(self) -> None:
+        build_tree(self.root, {"a/f.txt": b"1", "b/g.txt": b"2"})
+        a = os.path.join(self.root, "a")
+        b = os.path.join(self.root, "b")
+        JOBS["job-x"] = Job(
+            id="job-x", config={"a": a, "b": b, "rules": {}, "io_workers": 1, "use_cache": True}
+        )
+
+        with (
+            mock.patch("dupefinder.server.compare", side_effect=RuntimeError("boom")),
+            mock.patch("dupefinder.server.PersistentHashCache.close") as mock_close,
+            mock.patch("dupefinder.server._get_store", return_value=mock.Mock()),
+        ):
+            _run_scan_job("job-x", a, b, {}, io_workers=1, use_cache=True)
+
+        self.assertEqual(JOBS["job-x"].status, "error")
+        mock_close.assert_called_once()
 
 
 if __name__ == "__main__":
