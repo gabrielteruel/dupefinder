@@ -71,6 +71,24 @@ class Report:
 
 
 @dataclass
+class DuplicateGroup:
+    """A set of 2+ files inside a single scanned folder with byte-identical content.
+
+    Built by dedupe mode from ReportRow objects that share a sha256 digest --
+    see dupefinder.keeprules.group_duplicates(). Not used by compare mode.
+    """
+
+    digest: str                          # full SHA-256 shared by every member
+    size: int                            # size of ONE copy, in bytes
+    members: list[ReportRow] = field(default_factory=list)  # 2+, sorted by rel_path
+
+    @property
+    def wasted_bytes(self) -> int:
+        """Bytes reclaimable by keeping exactly one copy and discarding the rest."""
+        return self.size * (len(self.members) - 1)
+
+
+@dataclass
 class ScanProgress:
     """A snapshot of comparison progress, driven by bytes rather than buckets.
 
