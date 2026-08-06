@@ -499,6 +499,12 @@ class DedupeResolveTests(JobsTestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", payload)
 
+    def test_whitespace_only_rule_string_is_rejected(self) -> None:
+        status, payload = handle_dedupe_resolve({"job_id": "j", "keep_rules": ["   "]})
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
     def test_rejects_a_compare_mode_job(self) -> None:
         JOBS["compare-job"] = Job(id="compare-job", mode="compare", status="done",
                                    report=Report(rows=[], errors=[], stats=Stats()))

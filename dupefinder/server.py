@@ -505,7 +505,7 @@ def handle_dedupe_resolve(body: dict) -> tuple[int, dict]:
     job_id = body.get("job_id", "")
     keep_rules = body.get("keep_rules") or []
 
-    if any(not isinstance(r, str) or r.strip("/") == "" for r in keep_rules):
+    if any(not isinstance(r, str) or r.strip("/").strip() == "" for r in keep_rules):
         return 400, {"error": "keep_rules must be non-empty subtree paths"}
 
     job = JOBS.get(job_id)
