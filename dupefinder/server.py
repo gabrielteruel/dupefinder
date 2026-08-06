@@ -653,6 +653,11 @@ def handle_dedupe_apply(body: dict) -> tuple[int, dict]:
     # The survivor rail: recompute groups from the job's own report -- never
     # trust the client's selection alone -- and refuse a selection that would
     # empty any group of every member.
+    # _empty_group (the zero-byte duplicate group) is deliberately excluded from
+    # this rail. Zero-byte files share one SHA-256 by construction, so D5 keeps
+    # them out of preselection everywhere else too; an empty file has no content
+    # to lose, and quarantining is not deletion -- the audit report still records
+    # where every copy went. Selecting all of them out is allowed on purpose.
     groups, _empty_group = group_duplicates(job.report.rows)
     for group in groups:
         member_ids = {m.id for m in group.members}
