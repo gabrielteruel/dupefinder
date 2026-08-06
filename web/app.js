@@ -943,6 +943,14 @@ function resetState() {
   document.getElementById("scan-progress").hidden = true;
   document.getElementById("report-error").hidden = true;
   updatePathSummary();
+
+  state.mode = "compare";
+  state.dedupe = { groups: [], emptyGroup: null, keepRules: [], kept: {}, overrides: {} };
+
+  document.querySelector('input[name="mode"][value="compare"]').checked = true;
+  document.getElementById("field-row-b").hidden = false;
+  document.getElementById("dest-label").textContent = "Destination";
+  document.getElementById("dest-hint").textContent = "(where exclusive files will be moved)";
 }
 
 // ---------------------------------------------------------------------
@@ -1150,4 +1158,52 @@ function renderSelectionSummary() {
   }, 0);
   document.getElementById("dedupe-selection-summary").textContent =
     `${selected.length} file(s) to quarantine, ${formatBytes(bytes)}`;
+}
+
+document.getElementById("btn-dedupe-apply").addEventListener("click", () => {
+  const btn = document.getElementById("btn-dedupe-apply");
+  runAction(btn, "Moving…", async () => {
+    const errorEl = document.getElementById("dedupe-report-error");
+    errorEl.hidden = true;
+
+    const selected = computeDedupeSelection();
+    const confirmed = await confirmDialog({
+      title: "Move duplicates to quarantine",
+      message: `Move ${selected.length} file(s) to ${state.paths.dest}? Nothing is deleted -- ` +
+        `you can review the quarantine folder afterward.`,
+      confirmLabel: "Move files",
+    });
+    if (!confirmed) return;
+
+    try {
+      const data = await api("/api/dedupe/apply", "POST", {
+        job_id: state.jobId,
+        dest: state.paths.dest,
+        selected,
+      });
+      renderDedupeResult(data);
+      showScreen("screen-result");
+    } catch (err) {
+      errorEl.hidden = false;
+      errorEl.textContent = err.message;
+    }
+  });
+});
+
+function renderDedupeResult(data) {
+  const list = document.getElementById("result-summary");
+  list.innerHTML = "";
+  const items = [
+    `${data.moved.length} file(s) moved to quarantine`,
+    `${data.skipped_identical.length} skipped (identical file already at destination)`,
+    `${data.renamed.length} renamed to avoid a collision`,
+    `${data.trashed.length} noisy director(y/ies) moved to trash`,
+    `${data.errors.length} error(s)`,
+  ];
+  for (const text of items) {
+    const li = document.createElement("li");
+    li.textContent = text;
+    list.appendChild(li);
+  }
+  document.getElementById("result-report-path").textContent = `Audit report: ${data.report_path}`;
 }
