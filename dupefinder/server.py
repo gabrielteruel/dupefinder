@@ -19,6 +19,7 @@ from dupefinder.comparer import compare
 from dupefinder.diskinfo import combine, detect, is_wsl
 from dupefinder.eta import EtaEstimator
 from dupefinder.hashing import HashCache, PersistentHashCache
+from dupefinder.keeprules import group_duplicates, resolve
 from dupefinder.models import NoisyDir, Report
 from dupefinder.mover import (
     apply_moves,
@@ -460,6 +461,8 @@ def handle_report(job_id: str) -> tuple[int, dict]:
     job = JOBS.get(job_id)
     if job is None:
         return 404, {"error": f"unknown job: {job_id}"}
+    if job.mode != "compare":
+        return 409, {"error": f"job {job_id} is not a compare-mode job"}
     if job.status != "done":
         return 409, {"error": f"job is not finished yet (status={job.status})"}
 
@@ -471,6 +474,33 @@ def handle_report(job_id: str) -> tuple[int, dict]:
     }
 
 
+def handle_dedupe_report(job_id: str) -> tuple[int, dict]:
+    job = JOBS.get(job_id)
+    if job is None:
+        return 404, {"error": f"unknown job: {job_id}"}
+    if job.mode != "dedupe":
+        return 409, {"error": f"job {job_id} is not a dedupe-mode job"}
+    if job.status != "done":
+        return 409, {"error": f"job is not finished yet (status={job.status})"}
+
+    groups, empty_group = group_duplicates(job.report.rows)
+
+    def _group_payload(g):
+        return {
+            "digest": g.digest,
+            "size": g.size,
+            "wasted_bytes": g.wasted_bytes,
+            "members": [asdict(m) for m in g.members],
+        }
+
+    return 200, {
+        "groups": [_group_payload(g) for g in groups],
+        "empty_group": _group_payload(empty_group) if empty_group is not None else None,
+        "stats": asdict(job.report.stats),
+        "errors": [asdict(err) for err in job.report.errors],
+    }
+
+
 def handle_apply(body: dict) -> tuple[int, dict]:
     job_id = body.get("job_id", "")
     dest = body.get("dest", "")
@@ -479,6 +509,8 @@ def handle_apply(body: dict) -> tuple[int, dict]:
     job = JOBS.get(job_id)
     if job is None:
         return 404, {"error": f"unknown job: {job_id}"}
+    if job.mode != "compare":
+        return 409, {"error": f"job {job_id} is not a compare-mode job"}
     if job.status != "done":
         return 409, {"error": f"job is not finished yet (status={job.status})"}
 
@@ -553,6 +585,18 @@ def handle_apply(body: dict) -> tuple[int, dict]:
         "errors": move_result.errors,
         "report_path": report_path,
     }
+
+
+def handle_dedupe_apply(body: dict) -> tuple[int, dict]:
+    job_id = body.get("job_id", "")
+    job = JOBS.get(job_id)
+    if job is None:
+        return 404, {"error": f"unknown job: {job_id}"}
+    if job.mode != "dedupe":
+        return 409, {"error": f"job {job_id} is not a dedupe-mode job"}
+    if job.status != "done":
+        return 409, {"error": f"job is not finished yet (status={job.status})"}
+    return 501, {"error": "not implemented yet"}
 
 
 DEFAULT_SETTINGS = {"last_paths": None, "io_workers": 1, "use_cache": True}
@@ -635,6 +679,9 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/report":
             job_id = parse_qs(parsed.query).get("job", [""])[0]
             self._send_json(*handle_report(job_id))
+        elif parsed.path == "/api/dedupe/report":
+            job_id = parse_qs(parsed.query).get("job", [""])[0]
+            self._send_json(*handle_dedupe_report(job_id))
         elif parsed.path == "/api/settings":
             self._send_json(*handle_settings_get())
         elif parsed.path == "/api/cache/stats":

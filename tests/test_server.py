@@ -23,9 +23,12 @@ from dupefinder.server import (
     handle_apply,
     handle_cache_clear,
     handle_cache_stats,
+    handle_dedupe_apply,
+    handle_dedupe_report,
     handle_dedupe_scan,
     handle_prescan,
     handle_progress,
+    handle_report,
     handle_scan,
     handle_settings_get,
     handle_settings_post,
@@ -399,6 +402,76 @@ class DedupeScanTests(JobsTestCase):
         self.assertEqual(job.status, "done", job.error)
         digests = [row.sha256 for row in job.report.rows if row.sha256]
         self.assertEqual(len(digests), 2)  # a.txt and sub/copy.txt share one digest
+
+
+class ModeGuardTests(JobsTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        JOBS["compare-job"] = Job(id="compare-job", mode="compare", status="done",
+                                   report=Report(rows=[], errors=[], stats=Stats()))
+        JOBS["dedupe-job"] = Job(id="dedupe-job", mode="dedupe", status="done",
+                                  report=Report(rows=[], errors=[], stats=Stats()))
+
+    def test_compare_report_rejects_a_dedupe_job(self) -> None:
+        status, payload = handle_report("dedupe-job")
+
+        self.assertEqual(status, 409)
+        self.assertIn("error", payload)
+
+    def test_dedupe_report_rejects_a_compare_job(self) -> None:
+        status, payload = handle_dedupe_report("compare-job")
+
+        self.assertEqual(status, 409)
+        self.assertIn("error", payload)
+
+    def test_dedupe_apply_rejects_a_compare_job(self) -> None:
+        status, payload = handle_dedupe_apply(
+            {"job_id": "compare-job", "dest": "/tmp/x", "selected": []}
+        )
+
+        self.assertEqual(status, 409)
+
+    def test_compare_apply_rejects_a_dedupe_job(self) -> None:
+        status, payload = handle_apply({"job_id": "dedupe-job", "dest": "/tmp/x", "selected": []})
+
+        self.assertEqual(status, 409)
+
+
+class DedupeReportTests(JobsTestCase):
+    def test_returns_groups_and_a_separate_empty_group(self) -> None:
+        rows = [
+            ReportRow(id="a/x.png", abs_path="/root/a/x.png", rel_path="a/x.png",
+                      size=10, status="internal_copy", sha256="h1"),
+            ReportRow(id="b/x.png", abs_path="/root/b/x.png", rel_path="b/x.png",
+                      size=10, status="exclusive", sha256="h1"),
+            ReportRow(id=".gitkeep", abs_path="/root/.gitkeep", rel_path=".gitkeep",
+                      size=0, status="internal_copy", sha256="e3"),
+            ReportRow(id="src/.gitkeep", abs_path="/root/src/.gitkeep", rel_path="src/.gitkeep",
+                      size=0, status="exclusive", sha256="e3"),
+        ]
+        JOBS["j"] = Job(id="j", mode="dedupe", status="done",
+                         report=Report(rows=rows, errors=[], stats=Stats()))
+
+        status, payload = handle_dedupe_report("j")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["groups"]), 1)
+        self.assertEqual(payload["groups"][0]["digest"], "h1")
+        self.assertEqual(payload["groups"][0]["wasted_bytes"], 10)
+        self.assertIsNotNone(payload["empty_group"])
+        self.assertEqual(payload["empty_group"]["digest"], "e3")
+
+    def test_unknown_job_is_404(self) -> None:
+        status, payload = handle_dedupe_report("missing")
+
+        self.assertEqual(status, 404)
+
+    def test_unfinished_job_is_409(self) -> None:
+        JOBS["j"] = Job(id="j", mode="dedupe", status="running")
+
+        status, payload = handle_dedupe_report("j")
+
+        self.assertEqual(status, 409)
 
 
 class ProgressEtaTests(JobsTestCase):
