@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Dedupe mode: scan a single folder recursively for internal duplicates, choose which copy to
+  keep via ordered folder-priority rules, and move the rest to a quarantine folder. Reuses the
+  existing comparison pipeline, job infrastructure and persistent cache unchanged.
+
 ## [0.4.0] - 2026-08-04
 
 ### Added

@@ -78,11 +78,12 @@ Violating any of them is a bug, not a trade-off:
 | 2 | Nothing on disk changes until `POST /api/apply` is called | Scanning and reporting perform no writes at all |
 | 3 | Nothing is ever permanently deleted | "Delete" moves directories into `<destination>/_trash/` instead |
 | 4 | All code, comments, docstrings, UI strings, README and CHANGELOG are in English | Convention, checked in review |
-| 5 | Zero third-party dependencies — standard library only | No `requirements.txt`, no `pyproject.toml` dependency list, no CDN links; see §9 |
+| 5 | Zero third-party dependencies — standard library only | No `requirements.txt`, no `pyproject.toml` dependency list, no CDN links; see §10 |
 | 6 | Symbolic links are never followed (files or directories) | `scanner.scan()` skips symlinks explicitly — prevents infinite loops and duplicate accounting |
 | 7 | A read error never aborts a scan | Recorded as `unreadable`, walk continues |
 | — | Collisions never overwrite | Contents compared: identical → skip, different → `name_1.ext` |
 | — | Every run is auditable | JSON report written to `<destination>/_report_<timestamp>.json` |
+| — | Dedupe mode never empties a duplicate group | Validated twice: the UI's radio selection always excludes one member, and `handle_dedupe_apply` independently recomputes groups and rejects a selection that would remove every member |
 
 Four consequences worth stating explicitly:
 
@@ -99,7 +100,34 @@ Four consequences worth stating explicitly:
   resolved by suffixing, never by overwriting. The "Reuse cached hashes" checkbox is the escape
   hatch when certainty matters more than speed.
 
-## 5. Decisions already made — do not revisit
+## 5. Dedupe mode
+
+A second mode scans one folder recursively and finds files with byte-identical content inside
+it, rather than comparing two folders. It reuses the four-stage comparison pipeline unchanged
+by calling `compare(entries, [], cache)` with an empty folder B — the existing `internal_copy`
+classification already identifies duplicates within a single tree.
+
+`dupefinder/keeprules.py` is a pure module (no I/O) that groups rows sharing a `sha256` digest
+into `DuplicateGroup`s and resolves, via an ordered list of folder-priority rules, which member
+of each group to keep. The tie-break order is (matching rule index, path depth, rel_path
+lexicographic) — always total and deterministic, so the same input always yields the same
+output; this matters because the resolution is recorded in the audit report.
+
+Zero-byte files are grouped and shown, but excluded from automatic resolution: every zero-byte
+file shares one digest by construction, so auto-selecting would target every placeholder file
+(`.gitkeep` and similar) in the tree.
+
+"Delete" in dedupe mode means moving the discarded copies to a user-chosen quarantine folder,
+never `os.remove` — this keeps guarantee #3 above intact. `POST /api/dedupe/apply` reuses
+`apply_moves()` unchanged.
+
+Compare mode and dedupe mode share job/progress infrastructure but not their `/apply` semantics
+(compare moves what you keep; dedupe moves what you discard), so each job records its `mode`
+and every mode-specific endpoint rejects a job of the wrong mode with 409 — this makes it
+impossible, not just unlikely, for a compare job's selection to be interpreted with dedupe's
+inverted meaning.
+
+## 6. Decisions already made — do not revisit
 
 These were settled during the original build and re-confirmed for the resumability work. Each
 has a one-line reason; the reason is the part that stops someone "fixing" it later.
@@ -121,7 +149,7 @@ has a one-line reason; the reason is the part that stops someone "fixing" it lat
   than the source (`/home` vs `/mnt/c`, or across Windows drive letters), where `os.rename`
   fails.
 
-## 6. Concurrency
+## 7. Concurrency
 
 ### Request concurrency
 
@@ -157,7 +185,7 @@ hardware.** A timing run that contradicts it — for example, timing the same sc
 1, 2, 4 and 8 on a real spinning USB disk and finding a higher worker count wins — should revise
 the table with the measurement recorded. Otherwise it hardens into folklore.
 
-## 7. Platform notes: WSL
+## 8. Platform notes: WSL
 
 Two findings that are non-obvious and cost real debugging time.
 
@@ -215,13 +243,13 @@ cheap to check on every scan (a single `stat()`, no read). A cache keyed only on
 would silently serve a stale digest for an edited-and-restored-size file — exactly the kind of
 false "already have this" this tool is built to avoid.
 
-## 8. Environment
+## 9. Environment
 
 `tkinter` is not installed on the development or target machine. No UI work — present or
 future — may reach for it; the frontend is, and stays, the vanilla HTML/CSS/JS the browser talks
 to over the HTTP API.
 
-## 9. Why there are no dependencies
+## 10. Why there are no dependencies
 
 The "zero third-party dependencies" rule (§4, rule 5) was re-examined against this feature set
 rather than applied reflexively — the verdict was no dependency earns its place, but the
@@ -232,7 +260,7 @@ reasoning differs per candidate:
 | Bootstrap 5 | Prebuilt components, grid | ~230 KB vendored, would fight the existing 6.8 KB dark theme, and solves none of this UI's actual problems (the report table freeze is a rendering-volume bug, not a styling one). |
 | Pico.css / Water.css | Classless restyle | Would replace a working theme rather than fix anything — churn, not improvement. |
 | A virtual-table library (Clusterize.js et al.) | Windowed rendering for the report table | The problem is real, but the fix is ~70 lines of vanilla windowing against the existing markup — less code than vendoring and integrating a library. |
-| `platformdirs` | Cross-platform cache directory | Solves exactly the `cache_dir()` problem in 15 lines of stdlib that are already written and tested (§7). A dependency to save 15 lines fails the bar. |
+| `platformdirs` | Cross-platform cache directory | Solves exactly the `cache_dir()` problem in 15 lines of stdlib that are already written and tested (§8). A dependency to save 15 lines fails the bar. |
 | `xxhash` / `blake3` | 5–20x faster hashing | The bottleneck is the disk, not the CPU, on the hardware this targets — a USB HDD at ~100 MB/s against `hashlib.sha256` sustaining several hundred MB/s. Would buy nothing while invalidating every cached digest and the `sha256` field in every report and audit JSON. |
 | `psutil` | Mount/partition enumeration | Does not expose the HDD/SSD rotational property detection actually needs, so the PowerShell / `diskutil` / `sysfs` paths would have to be written anyway. |
 | FastAPI / Flask | Routing, validation, better DX | **The one place the rule has a real cost.** Both are genuinely nicer to write against than `BaseHTTPRequestHandler`. But the server already exists and works; rewriting it is pure regression risk for zero user-visible gain. Worth revisiting only if the API grows well beyond its current ~10 endpoints. |

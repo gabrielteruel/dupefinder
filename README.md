@@ -64,6 +64,26 @@ external requests.
    duplicate group is pre-selected, so you don't move five copies of the same thing.
 4. **Done.** A summary of what moved, plus a JSON audit report of the entire run.
 
+## Dedupe mode
+
+Sometimes there's no second folder to compare against — you just have one messy folder with
+copies of the same file scattered across it: a photo library re-imported twice, a project
+directory with old `backup/` subfolders nobody cleaned up. "Find duplicates in one folder"
+switches dupefinder to that mode: pick a single folder and it groups files by content,
+wherever they landed inside it.
+
+For each group of identical files, dupefinder needs to know which copy to *keep* — the rest go
+to quarantine. Add folder-priority rules (`fotos/originales` before `fotos/whatsapp`, for
+example) and, for every group, the copy in the highest-priority matching folder wins; if none
+of the rules apply, the copy closest to the folder's root wins. Groups made entirely of
+zero-byte files are shown but never auto-resolved, since every empty file has the same
+"content" and there's nothing meaningful to prefer.
+
+Nothing moves until you press "Move duplicates to quarantine" — the same read-first, review,
+then-act flow as comparing two folders, the same collision handling, and the same JSON audit
+report. dupefinder will not let a selection empty an entire group of every one of its copies;
+at least one always survives.
+
 ## Safety
 
 Moving files around is the kind of thing you only get to do wrong once, so the guarantees are
