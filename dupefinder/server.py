@@ -501,6 +501,27 @@ def handle_dedupe_report(job_id: str) -> tuple[int, dict]:
     }
 
 
+def handle_dedupe_resolve(body: dict) -> tuple[int, dict]:
+    job_id = body.get("job_id", "")
+    keep_rules = body.get("keep_rules") or []
+
+    if any(not isinstance(r, str) or r.strip("/") == "" for r in keep_rules):
+        return 400, {"error": "keep_rules must be non-empty subtree paths"}
+
+    job = JOBS.get(job_id)
+    if job is None:
+        return 404, {"error": f"unknown job: {job_id}"}
+    if job.mode != "dedupe":
+        return 409, {"error": f"job {job_id} is not a dedupe-mode job"}
+    if job.status != "done":
+        return 409, {"error": f"job is not finished yet (status={job.status})"}
+
+    groups, _empty_group = group_duplicates(job.report.rows)
+    kept = resolve(groups, keep_rules)
+
+    return 200, {"kept": kept}
+
+
 def handle_apply(body: dict) -> tuple[int, dict]:
     job_id = body.get("job_id", "")
     dest = body.get("dest", "")
@@ -646,6 +667,7 @@ POST_ROUTES = {
     "/api/prescan": handle_prescan,
     "/api/scan": handle_scan,
     "/api/dedupe/scan": handle_dedupe_scan,
+    "/api/dedupe/resolve": handle_dedupe_resolve,
     "/api/apply": handle_apply,
     "/api/settings": handle_settings_post,
     "/api/volumes": handle_volumes,

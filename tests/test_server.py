@@ -25,6 +25,7 @@ from dupefinder.server import (
     handle_cache_stats,
     handle_dedupe_apply,
     handle_dedupe_report,
+    handle_dedupe_resolve,
     handle_dedupe_scan,
     handle_prescan,
     handle_progress,
@@ -472,6 +473,44 @@ class DedupeReportTests(JobsTestCase):
         status, payload = handle_dedupe_report("j")
 
         self.assertEqual(status, 409)
+
+
+class DedupeResolveTests(JobsTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        rows = [
+            ReportRow(id="fotos-ordenadas/x.png", abs_path="/r/fotos-ordenadas/x.png",
+                      rel_path="fotos-ordenadas/x.png", size=10, status="internal_copy", sha256="h1"),
+            ReportRow(id="2019/x.png", abs_path="/r/2019/x.png",
+                      rel_path="2019/x.png", size=10, status="exclusive", sha256="h1"),
+        ]
+        JOBS["j"] = Job(id="j", mode="dedupe", status="done",
+                         report=Report(rows=rows, errors=[], stats=Stats()))
+
+    def test_resolves_using_the_given_keep_rules(self) -> None:
+        status, payload = handle_dedupe_resolve({"job_id": "j", "keep_rules": ["fotos-ordenadas"]})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["kept"]["h1"], "fotos-ordenadas/x.png")
+
+    def test_empty_rule_string_is_rejected(self) -> None:
+        status, payload = handle_dedupe_resolve({"job_id": "j", "keep_rules": [""]})
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_rejects_a_compare_mode_job(self) -> None:
+        JOBS["compare-job"] = Job(id="compare-job", mode="compare", status="done",
+                                   report=Report(rows=[], errors=[], stats=Stats()))
+
+        status, payload = handle_dedupe_resolve({"job_id": "compare-job", "keep_rules": []})
+
+        self.assertEqual(status, 409)
+
+    def test_unknown_job_is_404(self) -> None:
+        status, payload = handle_dedupe_resolve({"job_id": "missing", "keep_rules": []})
+
+        self.assertEqual(status, 404)
 
 
 class ProgressEtaTests(JobsTestCase):
