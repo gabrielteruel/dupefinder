@@ -44,7 +44,7 @@
     <!-- Shows the chosen A/B/destination paths on every screen after selection -->
     <div id="path-summary" class="path-summary" hidden>
       <div class="path-summary-item">
-        <span class="path-summary-label">Folder A</span>
+        <span id="summary-label-a" class="path-summary-label">Folder A</span>
         <span id="summary-path-a" class="path-summary-value"></span>
       </div>
       <div class="path-summary-item" id="summary-row-b">
@@ -101,7 +101,7 @@
       <button type="button" id="btn-change-mode" class="btn-link">← Change tool</button>
 
       <div class="field-row">
-        <label for="input-a">Folder A <span class="hint">(scanned for files to move)</span></label>
+        <label for="input-a"><span id="folder-a-label">Folder A</span> <span class="hint">(scanned for files to move)</span></label>
         <div class="path-input">
           <input type="text" id="input-a" placeholder="/path/to/folder-a" autocomplete="off" />
           <button type="button" class="btn btn-secondary" data-browse-target="a">Browse…</button>
@@ -141,7 +141,8 @@
       <h2>Review folders to skip</h2>
       <p class="screen-hint">
         These directories look like version control, dependencies, caches or system folders.
-        Choose what to do with each one. Folder B can never be moved to trash — it is never modified.
+        Choose what to do with each one.
+        <span id="prescan-hint-b">Folder B can never be moved to trash — it is never modified.</span>
       </p>
 
       <div id="prescan-controls" class="prescan-controls">

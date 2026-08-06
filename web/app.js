@@ -221,6 +221,11 @@ document.querySelectorAll('input[name="mode"]').forEach((radio) => {
     document.getElementById("dest-hint").textContent = isDedupe
       ? "(where duplicate copies will be moved)"
       : "(where exclusive files will be moved)";
+    // With no Folder B, calling the scanned folder "Folder A" is a distinction with
+    // nothing to distinguish from -- and Folder B doesn't exist to warn about at all.
+    document.getElementById("folder-a-label").textContent = isDedupe ? "Folder" : "Folder A";
+    document.getElementById("summary-label-a").textContent = isDedupe ? "Folder" : "Folder A";
+    document.getElementById("prescan-hint-b").hidden = isDedupe;
 
     document.querySelectorAll(".mode-card").forEach((card) => {
       card.classList.toggle("selected", card.querySelector('input[name="mode"]').checked);
@@ -1015,6 +1020,9 @@ function resetState() {
   document.getElementById("field-row-b").hidden = false;
   document.getElementById("dest-label").textContent = "Destination";
   document.getElementById("dest-hint").textContent = "(where exclusive files will be moved)";
+  document.getElementById("folder-a-label").textContent = "Folder A";
+  document.getElementById("summary-label-a").textContent = "Folder A";
+  document.getElementById("prescan-hint-b").hidden = false;
 }
 
 // ---------------------------------------------------------------------
@@ -1248,6 +1256,9 @@ function renderSelectionSummary() {
   const { ids, bytes } = computeDedupeSelection();
   document.getElementById("dedupe-selection-summary").textContent =
     `${ids.length} file(s) to quarantine, ${formatBytes(bytes)}`;
+  // Every duplicate group always leaves at least one file to move (one kept, the rest
+  // quarantined), so zero ids only happens when zero groups were found -- nothing to apply.
+  document.getElementById("btn-dedupe-apply").disabled = ids.length === 0;
 }
 
 document.getElementById("btn-dedupe-apply").addEventListener("click", () => {
