@@ -6,6 +6,7 @@
 
 const state = {
   paths: { a: "", b: "", dest: "" },
+  mode: "compare", // "compare" | "dedupe"
   browseTarget: null,
   browseCurrentPath: "",
   noisy: [],
@@ -152,13 +153,29 @@ async function runAction(button, label, fn) {
 // ---------------------------------------------------------------------
 
 function validateSelectScreen() {
-  const allFilled = state.paths.a && state.paths.b && state.paths.dest;
+  const allFilled =
+    state.mode === "dedupe"
+      ? state.paths.a && state.paths.dest
+      : state.paths.a && state.paths.b && state.paths.dest;
   document.getElementById("btn-continue-select").disabled = !allFilled;
 }
 
 Object.entries(pathInputs).forEach(([key, input]) => {
   input.addEventListener("input", () => {
     state.paths[key] = input.value.trim();
+    validateSelectScreen();
+  });
+});
+
+document.querySelectorAll('input[name="mode"]').forEach((radio) => {
+  radio.addEventListener("change", (e) => {
+    state.mode = e.target.value;
+    const isDedupe = state.mode === "dedupe";
+    document.getElementById("field-row-b").hidden = isDedupe;
+    document.getElementById("dest-label").textContent = isDedupe ? "Quarantine folder" : "Destination";
+    document.getElementById("dest-hint").textContent = isDedupe
+      ? "(where duplicate copies will be moved)"
+      : "(where exclusive files will be moved)";
     validateSelectScreen();
   });
 });

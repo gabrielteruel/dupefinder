@@ -34,6 +34,14 @@
     <section id="screen-select" class="screen active">
       <h2>1. Choose folders</h2>
 
+      <div class="field-row mode-selector">
+        <label>Mode</label>
+        <div class="mode-toggle">
+          <label><input type="radio" name="mode" value="compare" checked /> Compare two folders</label>
+          <label><input type="radio" name="mode" value="dedupe" /> Find duplicates in one folder</label>
+        </div>
+      </div>
+
       <div class="field-row">
         <label for="input-a">Folder A <span class="hint">(scanned for files to move)</span></label>
         <div class="path-input">
@@ -42,7 +50,7 @@
         </div>
       </div>
 
-      <div class="field-row">
+      <div class="field-row" id="field-row-b">
         <label for="input-b">Folder B <span class="hint">(never modified)</span></label>
         <div class="path-input">
           <input type="text" id="input-b" placeholder="/path/to/folder-b" autocomplete="off" />
@@ -51,7 +59,7 @@
       </div>
 
       <div class="field-row">
-        <label for="input-dest">Destination <span class="hint">(where exclusive files will be moved)</span></label>
+        <label for="input-dest"><span id="dest-label">Destination</span> <span id="dest-hint" class="hint">(where exclusive files will be moved)</span></label>
         <div class="path-input">
           <input type="text" id="input-dest" placeholder="/path/to/destination" autocomplete="off" />
           <button type="button" class="btn btn-secondary" data-browse-target="dest">Browse…</button>

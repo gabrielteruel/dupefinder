@@ -551,3 +551,16 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.mode-toggle {
+  display: flex;
+  gap: 20px;
+}
+
+.mode-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+  cursor: pointer;
+}
