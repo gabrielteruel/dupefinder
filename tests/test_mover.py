@@ -7,7 +7,14 @@ from unittest import mock
 
 from dupefinder.hashing import HashCache
 from dupefinder.models import NoisyDir
-from dupefinder.mover import _is_inside, apply_moves, move_to_trash, validate_paths, write_report
+from dupefinder.mover import (
+    _is_inside,
+    apply_moves,
+    move_to_trash,
+    validate_dedupe_paths,
+    validate_paths,
+    write_report,
+)
 from tests.helpers import TempTreeCase, build_tree
 
 
@@ -93,6 +100,34 @@ class ValidatePathsTests(TempTreeCase):
     def test_accepts_a_valid_combination(self) -> None:
         dest = os.path.join(self.root, "dest")
         validate_paths(self.a, self.b, dest)  # must not raise
+
+
+class ValidateDedupePathsTests(TempTreeCase):
+    def setUp(self) -> None:
+        super().setUp()
+        build_tree(self.root, {"folder/.keep": b""})
+        self.folder = os.path.join(self.root, "folder")
+
+    def test_rejects_nonexistent_folder(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_dedupe_paths(os.path.join(self.root, "missing"), os.path.join(self.root, "dest"))
+
+    def test_rejects_dest_equal_to_folder(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_dedupe_paths(self.folder, self.folder)
+
+    def test_rejects_dest_inside_folder(self) -> None:
+        dest = os.path.join(self.folder, "dest")
+        with self.assertRaises(ValueError):
+            validate_dedupe_paths(self.folder, dest)
+
+    def test_accepts_a_valid_combination(self) -> None:
+        dest = os.path.join(self.root, "dest")
+        validate_dedupe_paths(self.folder, dest)  # must not raise
+
+    def test_dest_need_not_exist_yet(self) -> None:
+        dest = os.path.join(self.root, "does", "not", "exist", "yet")
+        validate_dedupe_paths(self.folder, dest)  # must not raise
 
 
 class MoveToTrashTests(TempTreeCase):

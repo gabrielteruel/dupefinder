@@ -61,6 +61,26 @@ def validate_paths(a: str, b: str, dest: str) -> None:
         raise ValueError("the destination folder cannot be inside folder B")
 
 
+def validate_dedupe_paths(folder: str, dest: str) -> None:
+    """Validate the scanned folder and the quarantine destination for dedupe mode.
+
+    Mirrors validate_paths(): `folder` must be an existing directory, `dest`
+    may not exist yet (the caller creates it), and `dest` may be neither
+    equal to nor inside `folder` -- otherwise dedupe mode would be moving
+    files into the very tree it just scanned.
+    """
+    if not os.path.isdir(folder):
+        raise ValueError(f"folder does not exist or is not a directory: {folder}")
+
+    real_folder = os.path.normcase(os.path.realpath(folder))
+    real_dest = os.path.normcase(os.path.realpath(dest))
+
+    if real_dest == real_folder:
+        raise ValueError("the destination folder must be different from the scanned folder")
+    if _is_inside(real_dest, real_folder):
+        raise ValueError("the destination folder cannot be inside the scanned folder")
+
+
 def _is_inside(child: str, parent: str) -> bool:
     if child == parent:
         return False
