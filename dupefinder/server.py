@@ -130,6 +130,50 @@ def _single_flight(key: str):
 # --------------------------------------------------------------------------
 
 
+def _run_compare_pipeline(
+    job: Job,
+    entries_a: list,
+    entries_b: list,
+    pre_errors: list,
+    cache: HashCache,
+    io_workers: int,
+) -> None:
+    """Shared tail of both _run_scan_job and _run_dedupe_job: run compare()
+    against already-scanned entries and land the result on `job`.
+
+    Extracted because this part -- build the progress callback, call
+    compare(), merge in whatever read errors the walk phase(s) already
+    produced, mark the job done -- has no mode-specific meaning: it is pure
+    execution, identical whether the caller walked one folder or two. What
+    differs between callers (how many folders were walked, what phases they
+    reported) stays in each caller. comparer.py itself is never touched by
+    this extraction.
+
+    Mutates `job` in place (phase, processed, total, report, status).
+    """
+    job.phase = "comparing"
+    job.processed = 0
+    job.total = 0
+
+    def compare_progress_cb(sp) -> None:
+        job.processed = sp.buckets_done
+        job.total = sp.buckets_total
+        job.bytes_resolved = sp.bytes_resolved
+        job.bytes_to_resolve = sp.bytes_to_resolve
+        job.current_path = sp.current_path
+        if isinstance(cache, PersistentHashCache):
+            job.cache_hits = cache.cache_hits
+            job.cache_misses = cache.cache_misses
+        job.eta.observe(time.monotonic(), sp.bytes_resolved)
+
+    report = compare(entries_a, entries_b, cache, progress=compare_progress_cb, io_workers=io_workers)
+    report.errors = pre_errors + report.errors
+
+    job.report = report
+    job.phase = "done"
+    job.status = "done"
+
+
 def _run_scan_job(
     job_id: str, a: str, b: str, rules: dict[str, str], io_workers: int, use_cache: bool
 ) -> None:
@@ -153,31 +197,8 @@ def _run_scan_job(
         job.processed = 0
         entries_b, errors_b = scan(b, skip_abs_paths, progress=scan_progress_cb)
 
-        job.phase = "comparing"
-        job.processed = 0
-        job.total = 0
-
         cache = PersistentHashCache(_open_job_store()) if use_cache else HashCache()
-
-        def compare_progress_cb(sp) -> None:
-            job.processed = sp.buckets_done
-            job.total = sp.buckets_total
-            job.bytes_resolved = sp.bytes_resolved
-            job.bytes_to_resolve = sp.bytes_to_resolve
-            job.current_path = sp.current_path
-            if isinstance(cache, PersistentHashCache):
-                job.cache_hits = cache.cache_hits
-                job.cache_misses = cache.cache_misses
-            job.eta.observe(time.monotonic(), sp.bytes_resolved)
-
-        report = compare(
-            entries_a, entries_b, cache, progress=compare_progress_cb, io_workers=io_workers
-        )
-        report.errors = errors_a + errors_b + report.errors
-
-        job.report = report
-        job.phase = "done"
-        job.status = "done"
+        _run_compare_pipeline(job, entries_a, entries_b, errors_a + errors_b, cache, io_workers)
     except Exception as exc:  # the worker thread must never die silently
         print(f"scan job {job_id} failed: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
@@ -189,6 +210,44 @@ def _run_scan_job(
         # job's own private Store (see _open_job_store()), so closing it here
         # only flushes and closes this job's connection -- never one shared
         # with another still-running job or with /api/settings, /api/cache/*.
+        if cache is not None:
+            cache.close()
+
+
+def _run_dedupe_job(job_id: str, folder: str, rules: dict[str, str], io_workers: int, use_cache: bool) -> None:
+    """Background worker for dedupe mode: one folder in, compare() against an empty B.
+
+    Same shape as _run_scan_job but with one tree to walk instead of two, and
+    no "scanning_b" phase. Both share _run_compare_pipeline for the tail.
+    Reusing compare() with an empty entries_b list is deliberate -- see
+    docs/superpowers/specs/2026-08-05-dedupe-mode-design.md section 2: the
+    four-stage pipeline already classifies internal duplicates correctly
+    with zero changes to comparer.py.
+    """
+    job = JOBS[job_id]
+    cache: HashCache | None = None
+    try:
+        skip_abs_paths = {path for path, action in rules.items() if action in ("skip", "trash")}
+
+        noisy = find_noisy_dirs(folder, "A")
+        trash_dirs = [nd for nd in noisy if rules.get(nd.abs_path) == "trash"]
+        job.trash_dirs = trash_dirs
+
+        def scan_progress_cb(files_found: int, current_path: str) -> None:
+            job.processed = files_found
+            job.current_path = current_path
+
+        job.phase = "scanning_a"
+        entries, errors = scan(folder, skip_abs_paths, progress=scan_progress_cb)
+
+        cache = PersistentHashCache(_open_job_store()) if use_cache else HashCache()
+        _run_compare_pipeline(job, entries, [], errors, cache, io_workers)
+    except Exception as exc:  # the worker thread must never die silently
+        print(f"dedupe job {job_id} failed: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        job.status = "error"
+        job.error = str(exc)
+    finally:
         if cache is not None:
             cache.close()
 
@@ -329,6 +388,39 @@ def handle_scan(body: dict) -> tuple[int, dict]:
 
     thread = threading.Thread(
         target=_run_scan_job, args=(job_id, a, b, rules, io_workers, use_cache), daemon=True
+    )
+    thread.start()
+
+    return 200, {"job_id": job_id}
+
+
+def handle_dedupe_scan(body: dict) -> tuple[int, dict]:
+    folder = body.get("folder", "")
+    rules = body.get("rules") or {}
+    io_workers = body.get("io_workers", 1)
+    use_cache = body.get("use_cache", True)
+
+    if not isinstance(io_workers, int) or isinstance(io_workers, bool) or not (1 <= io_workers <= 32):
+        return 400, {"error": "io_workers must be an integer between 1 and 32"}
+
+    if not os.path.isdir(folder):
+        return 400, {"error": f"folder does not exist or is not a directory: {folder}"}
+
+    # Same long-path rationale as handle_scan: see the comment there.
+    folder = os.path.realpath(folder)
+
+    config = {"folder": folder, "rules": rules, "io_workers": io_workers, "use_cache": use_cache}
+
+    with JOBS_LOCK:
+        for existing in JOBS.values():
+            if existing.status == "running" and existing.mode == "dedupe" and existing.config == config:
+                return 200, {"job_id": existing.id}
+
+        job_id = uuid.uuid4().hex
+        JOBS[job_id] = Job(id=job_id, mode="dedupe", config=config)
+
+    thread = threading.Thread(
+        target=_run_dedupe_job, args=(job_id, folder, rules, io_workers, use_cache), daemon=True
     )
     thread.start()
 
@@ -509,6 +601,7 @@ POST_ROUTES = {
     "/api/browse": handle_browse,
     "/api/prescan": handle_prescan,
     "/api/scan": handle_scan,
+    "/api/dedupe/scan": handle_dedupe_scan,
     "/api/apply": handle_apply,
     "/api/settings": handle_settings_post,
     "/api/volumes": handle_volumes,

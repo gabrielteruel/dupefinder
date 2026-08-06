@@ -16,11 +16,14 @@ from dupefinder.server import (
     Busy,
     Job,
     _drive_shortcuts,
+    _run_compare_pipeline,
+    _run_dedupe_job,
     _run_scan_job,
     _single_flight,
     handle_apply,
     handle_cache_clear,
     handle_cache_stats,
+    handle_dedupe_scan,
     handle_prescan,
     handle_progress,
     handle_scan,
@@ -355,6 +358,47 @@ class ScanIoWorkersValidationTests(JobsTestCase):
     def test_rejects_non_integer_io_workers(self) -> None:
         status, payload = handle_scan({"a": self.a, "b": self.b, "io_workers": "four"})
         self.assertEqual(status, 400)
+
+
+class DedupeScanTests(JobsTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        build_tree(self.root, {"folder/a.txt": b"1", "folder/b.txt": b"2"})
+        self.folder = os.path.join(self.root, "folder")
+
+    def test_creates_a_job_with_dedupe_mode(self) -> None:
+        status, payload = handle_dedupe_scan({"folder": self.folder})
+
+        self.assertEqual(status, 200)
+        job = JOBS[payload["job_id"]]
+        self.assertEqual(job.mode, "dedupe")
+
+    def test_rejects_a_nonexistent_folder(self) -> None:
+        status, payload = handle_dedupe_scan({"folder": os.path.join(self.root, "missing")})
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_rejects_io_workers_above_the_max(self) -> None:
+        status, payload = handle_dedupe_scan({"folder": self.folder, "io_workers": 99})
+
+        self.assertEqual(status, 400)
+        self.assertIn("io_workers", payload["error"])
+
+    def test_end_to_end_scan_finds_a_duplicate_pair(self) -> None:
+        # Calls _run_dedupe_job directly and synchronously, exactly like
+        # CacheCloseOnFailureTests does for _run_scan_job (test_server.py:381):
+        # this is the established way to assert on a finished job's state
+        # without threading a wait for the background thread into the test.
+        build_tree(self.root, {"folder/sub/copy.txt": b"1"})  # duplicate of a.txt
+        JOBS["j"] = Job(id="j", mode="dedupe", config={"folder": self.folder})
+
+        _run_dedupe_job("j", self.folder, {}, io_workers=1, use_cache=False)
+
+        job = JOBS["j"]
+        self.assertEqual(job.status, "done", job.error)
+        digests = [row.sha256 for row in job.report.rows if row.sha256]
+        self.assertEqual(len(digests), 2)  # a.txt and sub/copy.txt share one digest
 
 
 class ProgressEtaTests(JobsTestCase):
