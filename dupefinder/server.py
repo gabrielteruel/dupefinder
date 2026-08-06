@@ -37,6 +37,7 @@ DEFAULT_PORT = 8765
 @dataclass
 class Job:
     id: str
+    mode: str = "compare"  # "compare" | "dedupe" -- guards which endpoints may touch this job
     status: str = "running"  # "running" | "done" | "error"
     phase: str = "scanning_a"  # "scanning_a" | "scanning_b" | "comparing" | "done"
     processed: int = 0
@@ -265,7 +266,15 @@ def handle_browse(body: dict) -> tuple[int, dict]:
 
 def handle_prescan(body: dict) -> tuple[int, dict]:
     a = body.get("a", "")
-    b = body.get("b", "")
+    b = body.get("b") or None  # dedupe mode omits b entirely
+
+    if b is None:
+        if not os.path.isdir(a):
+            return 400, {"error": f"folder does not exist or is not a directory: {a}"}
+        a = os.path.realpath(a)
+        with _single_flight(f"prescan:{a}"):
+            noisy = find_noisy_dirs(a, "A")
+        return 200, {"noisy": [asdict(n) for n in noisy]}
 
     try:
         validate_sources(a, b)

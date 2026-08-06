@@ -21,6 +21,7 @@ from dupefinder.server import (
     handle_apply,
     handle_cache_clear,
     handle_cache_stats,
+    handle_prescan,
     handle_progress,
     handle_scan,
     handle_settings_get,
@@ -196,6 +197,20 @@ class ScanDeduplicationTests(JobsTestCase):
 
         self.assertEqual(status, 200)
         self.assertNotEqual(payload["job_id"], "old")
+
+
+class PrescanSingleFolderTests(JobsTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        build_tree(self.root, {"a/.git/config": b"x", "a/photo.png": b"y"})
+        self.a = os.path.join(self.root, "a")
+
+    def test_prescan_accepts_a_request_with_no_b(self) -> None:
+        status, payload = handle_prescan({"a": self.a})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["noisy"]), 1)
+        self.assertEqual(payload["noisy"][0]["root"], "A")
 
 
 class ApplyOnceTests(JobsTestCase):
