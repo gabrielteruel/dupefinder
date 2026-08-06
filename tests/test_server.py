@@ -1,5 +1,6 @@
 """Tests for dupefinder.server."""
 
+import json
 import os
 import threading
 import time
@@ -577,6 +578,31 @@ class DedupeApplyTests(JobsTestCase):
 
         self.assertEqual(status, 400)
         self.assertIn("error", payload)
+
+    def test_audit_report_records_the_keep_rules_that_produced_the_selection(self) -> None:
+        status, payload = handle_dedupe_apply(
+            {
+                "job_id": "j",
+                "dest": self.dest,
+                "selected": ["a/x.png", "b/x.png"],
+                "keep_rules": ["c"],
+            }
+        )
+
+        self.assertEqual(status, 200)
+        with open(payload["report_path"], encoding="utf-8") as f:
+            report = json.load(f)
+        self.assertEqual(report["keep_rules"], ["c"])
+
+    def test_audit_report_records_empty_keep_rules_when_none_were_set(self) -> None:
+        status, payload = handle_dedupe_apply(
+            {"job_id": "j", "dest": self.dest, "selected": ["a/x.png", "b/x.png"]}
+        )
+
+        self.assertEqual(status, 200)
+        with open(payload["report_path"], encoding="utf-8") as f:
+            report = json.load(f)
+        self.assertEqual(report["keep_rules"], [])
 
 
 class ProgressEtaTests(JobsTestCase):

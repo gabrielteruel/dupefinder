@@ -523,7 +523,9 @@ def handle_dedupe_resolve(body: dict) -> tuple[int, dict]:
     return 200, {"kept": kept}
 
 
-def _execute_apply(job: Job, dest: str, entries: list[tuple[str, str]]) -> tuple[int, dict]:
+def _execute_apply(
+    job: Job, dest: str, entries: list[tuple[str, str]], extra_report_fields: dict | None = None
+) -> tuple[int, dict]:
     """Shared move-and-audit mechanics for both handle_apply and handle_dedupe_apply.
 
     By the time this runs, `entries` is already a concrete list of
@@ -535,6 +537,11 @@ def _execute_apply(job: Job, dest: str, entries: list[tuple[str, str]]) -> tuple
 
     Caller must already hold job.applying == True (claimed under JOBS_LOCK)
     before calling this; this always clears job.applying in its finally.
+
+    `extra_report_fields`, if given, is merged into the audit-report payload
+    verbatim -- e.g. dedupe mode's keep_rules, so the report can reconstruct
+    *why* each file was selected, not just what moved. Compare mode passes
+    nothing and its report shape is unchanged.
     """
     try:
         os.makedirs(dest, exist_ok=True)
@@ -556,6 +563,7 @@ def _execute_apply(job: Job, dest: str, entries: list[tuple[str, str]]) -> tuple
             "renamed": move_result.renamed,
             "trashed": move_result.trashed,
             "errors": move_result.errors,
+            **(extra_report_fields or {}),
         }
         report_path = write_report(dest, payload)
         job.applied = True
@@ -627,6 +635,7 @@ def handle_dedupe_apply(body: dict) -> tuple[int, dict]:
     job_id = body.get("job_id", "")
     dest = body.get("dest", "")
     selected = set(body.get("selected") or [])
+    keep_rules = body.get("keep_rules") or []
 
     job = JOBS.get(job_id)
     if job is None:
@@ -677,7 +686,7 @@ def handle_dedupe_apply(body: dict) -> tuple[int, dict]:
         job.applying = True
 
     entries = [(rows_by_id[row_id].abs_path, rows_by_id[row_id].rel_path) for row_id in selected]
-    return _execute_apply(job, dest, entries)
+    return _execute_apply(job, dest, entries, extra_report_fields={"keep_rules": keep_rules})
 
 
 DEFAULT_SETTINGS = {"last_paths": None, "io_workers": 1, "use_cache": True}

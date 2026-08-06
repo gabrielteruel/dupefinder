@@ -122,8 +122,16 @@ function showScreen(id) {
 
 function updatePathSummary() {
   document.getElementById("summary-path-a").textContent = state.paths.a;
-  document.getElementById("summary-path-b").textContent = state.paths.b;
   document.getElementById("summary-path-dest").textContent = state.paths.dest;
+
+  // Folder B is stale in dedupe mode (see loadVolumeInfo()'s comment for why),
+  // so its line in the summary is hidden rather than showing a path that will
+  // never actually be scanned.
+  const isDedupe = state.mode === "dedupe";
+  document.getElementById("summary-row-b").hidden = isDedupe;
+  if (!isDedupe) {
+    document.getElementById("summary-path-b").textContent = state.paths.b;
+  }
 }
 
 /**
@@ -386,7 +394,13 @@ async function loadVolumeInfo() {
   const container = document.getElementById("volume-info");
   container.innerHTML = `<p class="screen-hint">Detecting disk types…</p>`;
   try {
-    const data = await api("/api/volumes", "POST", { a: state.paths.a, b: state.paths.b });
+    // state.paths.b is stale in dedupe mode -- restored from saved settings on
+    // load and never cleared when switching modes -- so it must not be sent
+    // here: it would never actually be scanned, and combine()-ing it in would
+    // skew suggested_workers off the volume that will actually be walked.
+    const volumesBody =
+      state.mode === "dedupe" ? { a: state.paths.a } : { a: state.paths.a, b: state.paths.b };
+    const data = await api("/api/volumes", "POST", volumesBody);
     container.innerHTML = data.volumes
       .map(
         (v, i) =>
@@ -1037,7 +1051,14 @@ async function addKeepRule(rulePath) {
   if (state.dedupe.keepRules.includes(rulePath)) return;
   state.dedupe.keepRules.unshift(rulePath); // new rules default to top priority
   state.dedupe.overrides = {}; // a rule change supersedes manual per-group overrides
-  await refreshKeptSelection();
+  const errorEl = document.getElementById("dedupe-report-error");
+  try {
+    await refreshKeptSelection();
+    errorEl.hidden = true;
+  } catch (err) {
+    errorEl.hidden = false;
+    errorEl.textContent = err.message;
+  }
   renderKeepRules();
   renderDedupeGroups();
 }
@@ -1046,14 +1067,28 @@ async function moveKeepRule(from, to) {
   const rules = state.dedupe.keepRules;
   const [moved] = rules.splice(from, 1);
   rules.splice(to, 0, moved);
-  await refreshKeptSelection();
+  const errorEl = document.getElementById("dedupe-report-error");
+  try {
+    await refreshKeptSelection();
+    errorEl.hidden = true;
+  } catch (err) {
+    errorEl.hidden = false;
+    errorEl.textContent = err.message;
+  }
   renderKeepRules();
   renderDedupeGroups();
 }
 
 async function removeKeepRule(index) {
   state.dedupe.keepRules.splice(index, 1);
-  await refreshKeptSelection();
+  const errorEl = document.getElementById("dedupe-report-error");
+  try {
+    await refreshKeptSelection();
+    errorEl.hidden = true;
+  } catch (err) {
+    errorEl.hidden = false;
+    errorEl.textContent = err.message;
+  }
   renderKeepRules();
   renderDedupeGroups();
 }
@@ -1135,29 +1170,34 @@ function renderDedupeEmptyGroup() {
   }
 }
 
-/** Every member not currently kept, across all real groups (the empty group is excluded — D5). */
+/**
+ * Every member not currently kept, across all real groups (the empty group is
+ * excluded — D5), plus their total byte count.
+ *
+ * Computed in a single O(N) pass over state.dedupe.groups -- member.size is
+ * already at hand while iterating, so there is no need for a second pass to
+ * look sizes back up afterward (that second pass used to be a per-selected-id
+ * linear .find() across every group's every member, i.e. quadratic).
+ */
 function computeDedupeSelection() {
-  const selected = [];
+  const ids = [];
+  let bytes = 0;
   for (const group of state.dedupe.groups) {
     const keptPath = keptPathFor(group.digest);
     for (const member of group.members) {
-      if (member.rel_path !== keptPath) selected.push(member.id);
+      if (member.rel_path !== keptPath) {
+        ids.push(member.id);
+        bytes += member.size;
+      }
     }
   }
-  return selected;
+  return { ids, bytes };
 }
 
 function renderSelectionSummary() {
-  const selected = computeDedupeSelection();
-  const bytes = selected.reduce((sum, id) => {
-    for (const group of state.dedupe.groups) {
-      const member = group.members.find((m) => m.id === id);
-      if (member) return sum + member.size;
-    }
-    return sum;
-  }, 0);
+  const { ids, bytes } = computeDedupeSelection();
   document.getElementById("dedupe-selection-summary").textContent =
-    `${selected.length} file(s) to quarantine, ${formatBytes(bytes)}`;
+    `${ids.length} file(s) to quarantine, ${formatBytes(bytes)}`;
 }
 
 document.getElementById("btn-dedupe-apply").addEventListener("click", () => {
@@ -1166,7 +1206,13 @@ document.getElementById("btn-dedupe-apply").addEventListener("click", () => {
     const errorEl = document.getElementById("dedupe-report-error");
     errorEl.hidden = true;
 
-    const selected = computeDedupeSelection();
+    const { ids: selected } = computeDedupeSelection();
+    if (selected.length === 0) {
+      errorEl.hidden = false;
+      errorEl.textContent = "Select at least one file to move.";
+      return;
+    }
+
     const confirmed = await confirmDialog({
       title: "Move duplicates to quarantine",
       message: `Move ${selected.length} file(s) to ${state.paths.dest}? Nothing is deleted -- ` +
@@ -1180,6 +1226,7 @@ document.getElementById("btn-dedupe-apply").addEventListener("click", () => {
         job_id: state.jobId,
         dest: state.paths.dest,
         selected,
+        keep_rules: state.dedupe.keepRules,
       });
       renderDedupeResult(data);
       showScreen("screen-result");
