@@ -83,7 +83,7 @@ Violating any of them is a bug, not a trade-off:
 | 7 | A read error never aborts a scan | Recorded as `unreadable`, walk continues |
 | — | Collisions never overwrite | Contents compared: identical → skip, different → `name_1.ext` |
 | — | Every run is auditable | JSON report written to `<destination>/_report_<timestamp>.json` |
-| — | Dedupe mode never empties a duplicate group | Validated twice: the UI's radio selection always excludes one member, and `handle_dedupe_apply` independently recomputes groups and rejects a selection that would remove every member |
+| — | Dedupe mode never empties a duplicate group of files with real content | Validated twice: the UI's radio selection always excludes one member, and `handle_dedupe_apply` independently recomputes groups and rejects a selection that would remove every member. The zero-byte group is deliberately excluded from this check — every empty file shares one digest by construction and has no content to lose, so quarantining every copy of it is not a data-loss event |
 
 Four consequences worth stating explicitly:
 
