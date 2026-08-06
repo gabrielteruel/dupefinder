@@ -552,17 +552,79 @@ select {
   text-overflow: ellipsis;
 }
 
-.mode-toggle {
-  display: flex;
-  gap: 20px;
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  font-size: 0.85rem;
+  cursor: pointer;
+  margin-bottom: 16px;
+  display: inline-block;
 }
 
-.mode-toggle label {
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+.mode-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.mode-card {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 400;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 20px;
   cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.mode-card:hover {
+  border-color: var(--accent);
+}
+
+.mode-card input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.mode-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.mode-card-icon {
+  color: var(--text-dim);
+}
+
+.mode-card.selected .mode-card-icon {
+  color: var(--accent);
+}
+
+.mode-card-title {
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.mode-card-desc {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 640px) {
+  .mode-cards {
+    grid-template-columns: 1fr;
+  }
 }
 
 .keep-rules-panel {

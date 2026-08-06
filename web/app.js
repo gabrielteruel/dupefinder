@@ -6,7 +6,7 @@
 
 const state = {
   paths: { a: "", b: "", dest: "" },
-  mode: "compare", // "compare" | "dedupe"
+  mode: null, // "compare" | "dedupe" | null (unset, until the mode-selection step is completed)
   dedupe: {
     groups: [],       // [{digest, size, wasted_bytes, members: [ReportRow-shaped dicts]}]
     emptyGroup: null,
@@ -117,7 +117,7 @@ function showScreen(id) {
 
   // The path summary is redundant with the inputs on screen 1, so it only
   // shows on the screens that follow folder selection.
-  document.getElementById("path-summary").hidden = id === "screen-select";
+  document.getElementById("path-summary").hidden = id === "screen-mode" || id === "screen-select";
 }
 
 function updatePathSummary() {
@@ -191,8 +191,22 @@ document.querySelectorAll('input[name="mode"]').forEach((radio) => {
     document.getElementById("dest-hint").textContent = isDedupe
       ? "(where duplicate copies will be moved)"
       : "(where exclusive files will be moved)";
+
+    document.querySelectorAll(".mode-card").forEach((card) => {
+      card.classList.toggle("selected", card.querySelector('input[name="mode"]').checked);
+    });
+    document.getElementById("btn-continue-mode").disabled = false;
+
     validateSelectScreen();
   });
+});
+
+document.getElementById("btn-continue-mode").addEventListener("click", () => {
+  showScreen("screen-select");
+});
+
+document.getElementById("btn-change-mode").addEventListener("click", () => {
+  showScreen("screen-mode");
 });
 
 const btnContinueSelect = document.getElementById("btn-continue-select");
@@ -927,7 +941,7 @@ function renderResult(result) {
 
 document.getElementById("btn-start-over").addEventListener("click", () => {
   resetState();
-  showScreen("screen-select");
+  showScreen("screen-mode");
 });
 
 function resetState() {
@@ -958,10 +972,14 @@ function resetState() {
   document.getElementById("report-error").hidden = true;
   updatePathSummary();
 
-  state.mode = "compare";
+  state.mode = null;
   state.dedupe = { groups: [], emptyGroup: null, keepRules: [], kept: {}, overrides: {} };
 
-  document.querySelector('input[name="mode"][value="compare"]').checked = true;
+  document.querySelectorAll('input[name="mode"]').forEach((radio) => {
+    radio.checked = false;
+  });
+  document.querySelectorAll(".mode-card").forEach((card) => card.classList.remove("selected"));
+  document.getElementById("btn-continue-mode").disabled = true;
   document.getElementById("field-row-b").hidden = false;
   document.getElementById("dest-label").textContent = "Destination";
   document.getElementById("dest-hint").textContent = "(where exclusive files will be moved)";

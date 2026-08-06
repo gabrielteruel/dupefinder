@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>dupefinder — content-based folder comparison</title>
+  <title>dupefinder — find and clean duplicate files</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <header class="app-header">
     <h1>dupefinder</h1>
-    <p class="app-subtitle">Find files in Folder A that don't exist in Folder B — by content, not by name.</p>
+    <p class="app-subtitle">Find and clean up duplicate files, comparing by content — not by name.</p>
   </header>
 
   <main class="app-main">
@@ -30,17 +30,48 @@
       </div>
     </div>
 
-    <!-- SCREEN 1: folder selection -->
-    <section id="screen-select" class="screen active">
-      <h2>1. Choose folders</h2>
+    <!-- SCREEN 0: mode selection -->
+    <section id="screen-mode" class="screen active">
+      <h2>Choose a tool</h2>
+      <p class="screen-hint">Pick what you want to do. You can switch back without losing what you've typed.</p>
 
-      <div class="field-row mode-selector">
-        <label>Mode</label>
-        <div class="mode-toggle">
-          <label><input type="radio" name="mode" value="compare" checked /> Compare two folders</label>
-          <label><input type="radio" name="mode" value="dedupe" /> Find duplicates in one folder</label>
-        </div>
+      <div class="mode-cards">
+        <label class="mode-card" for="mode-compare">
+          <input type="radio" name="mode" id="mode-compare" value="compare" />
+          <span class="mode-card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6">
+              <rect x="3" y="5" width="8" height="14" rx="1.5" />
+              <rect x="13" y="5" width="8" height="14" rx="1.5" />
+              <path d="M11 12h2" stroke-linecap="round" />
+            </svg>
+          </span>
+          <span class="mode-card-title">Compare two folders</span>
+          <span class="mode-card-desc">Find files in one folder that don't exist in another, by content.</span>
+        </label>
+
+        <label class="mode-card" for="mode-dedupe">
+          <input type="radio" name="mode" id="mode-dedupe" value="dedupe" />
+          <span class="mode-card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6">
+              <rect x="5" y="3" width="12" height="15" rx="1.5" />
+              <rect x="8" y="6" width="12" height="15" rx="1.5" fill="var(--panel)" />
+              <path d="M11 13.5l2 2 3.5-4" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <span class="mode-card-title">Find duplicates</span>
+          <span class="mode-card-desc">Find duplicate copies inside a single folder and keep only one.</span>
+        </label>
       </div>
+
+      <div class="actions">
+        <button type="button" id="btn-continue-mode" class="btn btn-primary" disabled>Continue</button>
+      </div>
+    </section>
+
+    <!-- SCREEN 1: folder selection -->
+    <section id="screen-select" class="screen">
+      <h2>Choose folders</h2>
+      <button type="button" id="btn-change-mode" class="btn-link">← Change tool</button>
 
       <div class="field-row">
         <label for="input-a">Folder A <span class="hint">(scanned for files to move)</span></label>
@@ -80,7 +111,7 @@
 
     <!-- SCREEN 2: noisy-directory pre-scan + progress -->
     <section id="screen-prescan" class="screen">
-      <h2>2. Review folders to skip</h2>
+      <h2>Review folders to skip</h2>
       <p class="screen-hint">
         These directories look like version control, dependencies, caches or system folders.
         Choose what to do with each one. Folder B can never be moved to trash — it is never modified.
@@ -157,7 +188,7 @@
 
     <!-- SCREEN 3: report -->
     <section id="screen-report" class="screen">
-      <h2>3. Review and select files to move</h2>
+      <h2>Review and select files to move</h2>
 
       <div class="report-toolbar">
         <input type="text" id="report-filter" placeholder="Filter by path…" />
@@ -199,7 +230,7 @@
 
     <!-- SCREEN 3b: dedupe report (grouped duplicates) -->
     <section id="screen-dedupe-report" class="screen">
-      <h2>3. Choose which copy to keep</h2>
+      <h2>Choose which copy to keep</h2>
 
       <div id="keep-rules-panel" class="keep-rules-panel">
         <h3>Keep-priority rules</h3>
@@ -232,7 +263,7 @@
 
     <!-- SCREEN 4: result -->
     <section id="screen-result" class="screen">
-      <h2>4. Done</h2>
+      <h2>Done</h2>
       <ul id="result-summary" class="result-summary"></ul>
       <p id="result-report-path" class="report-path"></p>
       <div class="actions">
