@@ -564,3 +564,73 @@ select {
   font-weight: 400;
   cursor: pointer;
 }
+
+.keep-rules-panel {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.keep-rules-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.keep-rules-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+}
+
+.keep-rules-list .rule-path {
+  flex: 1;
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.keep-rules-list button {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+
+.duplicate-group {
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+
+.duplicate-group-header {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.duplicate-group-member {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.duplicate-group-member .member-path {
+  flex: 1;
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.duplicate-group-member button {
+  padding: 3px 8px;
+  font-size: 0.78rem;
+}

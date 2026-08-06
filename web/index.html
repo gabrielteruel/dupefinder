@@ -197,6 +197,39 @@
       </div>
     </section>
 
+    <!-- SCREEN 3b: dedupe report (grouped duplicates) -->
+    <section id="screen-dedupe-report" class="screen">
+      <h2>3. Choose which copy to keep</h2>
+
+      <div id="keep-rules-panel" class="keep-rules-panel">
+        <h3>Keep-priority rules</h3>
+        <p class="screen-hint">
+          The highest folder in this list wins when a duplicate has a copy inside it. Folders
+          not listed fall back to the shallowest path, then alphabetical order.
+        </p>
+        <ol id="keep-rules-list" class="keep-rules-list"></ol>
+        <p id="keep-rules-empty" class="screen-hint">No rules yet — ties are broken by shortest path.</p>
+      </div>
+
+      <p id="dedupe-report-summary" class="screen-hint"></p>
+
+      <div class="table-wrap" id="dedupe-groups-wrap">
+        <div id="dedupe-groups"></div>
+      </div>
+
+      <details id="dedupe-empty-group-panel" class="errors-panel" hidden>
+        <summary>Zero-byte files (not preselected)</summary>
+        <ul id="dedupe-empty-group-list"></ul>
+      </details>
+
+      <p id="dedupe-report-error" class="error-text" hidden></p>
+
+      <div class="actions">
+        <span id="dedupe-selection-summary" class="selection-summary"></span>
+        <button type="button" id="btn-dedupe-apply" class="btn btn-primary">Move duplicates to quarantine</button>
+      </div>
+    </section>
+
     <!-- SCREEN 4: result -->
     <section id="screen-result" class="screen">
       <h2>4. Done</h2>

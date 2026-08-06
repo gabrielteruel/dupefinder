@@ -7,6 +7,13 @@
 const state = {
   paths: { a: "", b: "", dest: "" },
   mode: "compare", // "compare" | "dedupe"
+  dedupe: {
+    groups: [],       // [{digest, size, wasted_bytes, members: [ReportRow-shaped dicts]}]
+    emptyGroup: null,
+    keepRules: [],    // ordered list of folder rel_paths, highest priority first
+    kept: {},         // digest -> rel_path, from the last /api/dedupe/resolve call
+    overrides: {},    // digest -> rel_path, user's manual radio picks that beat `kept`
+  },
   browseTarget: null,
   browseCurrentPath: "",
   noisy: [],
@@ -187,7 +194,9 @@ btnContinueSelect.addEventListener("click", () => {
     const errorEl = document.getElementById("select-error");
     errorEl.hidden = true;
     try {
-      const data = await api("/api/prescan", "POST", { a: state.paths.a, b: state.paths.b });
+      const prescanBody =
+        state.mode === "dedupe" ? { a: state.paths.a } : { a: state.paths.a, b: state.paths.b };
+      const data = await api("/api/prescan", "POST", prescanBody);
       state.noisy = data.noisy;
       state.rules = {};
       updatePathSummary();
@@ -460,13 +469,21 @@ async function startScan() {
   }).catch(() => {});
 
   try {
-    const data = await api("/api/scan", "POST", {
-      a: state.paths.a,
-      b: state.paths.b,
-      rules: state.rules,
-      io_workers: state.ioWorkers,
-      use_cache: state.useCache,
-    });
+    const data =
+      state.mode === "dedupe"
+        ? await api("/api/dedupe/scan", "POST", {
+            folder: state.paths.a,
+            rules: state.rules,
+            io_workers: state.ioWorkers,
+            use_cache: state.useCache,
+          })
+        : await api("/api/scan", "POST", {
+            a: state.paths.a,
+            b: state.paths.b,
+            rules: state.rules,
+            io_workers: state.ioWorkers,
+            use_cache: state.useCache,
+          });
     state.jobId = data.job_id;
     // Awaited so the caller stays "busy" for the whole scan, not just the POST.
     await pollProgress();
@@ -599,7 +616,11 @@ function pollProgress() {
           clearInterval(interval);
           state.cacheHits = data.cache_hits;
           state.cacheMisses = data.cache_misses;
-          await loadReport();
+          if (state.mode === "dedupe") {
+            await loadDedupeReport();
+          } else {
+            await loadReport();
+          }
           resolve();
         } else if (data.status === "error") {
           clearInterval(interval);
@@ -922,4 +943,211 @@ function resetState() {
   document.getElementById("scan-progress").hidden = true;
   document.getElementById("report-error").hidden = true;
   updatePathSummary();
+}
+
+// ---------------------------------------------------------------------
+// Screen 3b: dedupe report (grouped duplicates)
+// ---------------------------------------------------------------------
+
+async function loadDedupeReport() {
+  const errorEl = document.getElementById("dedupe-report-error");
+  errorEl.hidden = true;
+  try {
+    const data = await api(`/api/dedupe/report?job=${encodeURIComponent(state.jobId)}`, "GET");
+    state.dedupe.groups = data.groups;
+    state.dedupe.emptyGroup = data.empty_group;
+    state.dedupe.keepRules = [];
+    state.dedupe.overrides = {};
+    await refreshKeptSelection();
+    renderKeepRules();
+    renderDedupeGroups();
+    renderDedupeSummary(data);
+    showScreen("screen-dedupe-report");
+  } catch (err) {
+    errorEl.hidden = false;
+    errorEl.textContent = err.message;
+  }
+}
+
+/** Re-resolve kept-copy preselection from the server. Called on every rule change. */
+async function refreshKeptSelection() {
+  const data = await api("/api/dedupe/resolve", "POST", {
+    job_id: state.jobId,
+    keep_rules: state.dedupe.keepRules,
+  });
+  state.dedupe.kept = data.kept;
+}
+
+function renderDedupeSummary(stats) {
+  const totalWasted = state.dedupe.groups.reduce((sum, g) => sum + g.wasted_bytes, 0);
+  document.getElementById("dedupe-report-summary").textContent =
+    `${state.dedupe.groups.length} duplicate group(s) found, ${formatBytes(totalWasted)} reclaimable.`;
+}
+
+function renderKeepRules() {
+  const list = document.getElementById("keep-rules-list");
+  const emptyNote = document.getElementById("keep-rules-empty");
+  list.innerHTML = "";
+  emptyNote.hidden = state.dedupe.keepRules.length > 0;
+
+  state.dedupe.keepRules.forEach((rule, index) => {
+    const li = document.createElement("li");
+
+    const pathSpan = document.createElement("span");
+    pathSpan.className = "rule-path";
+    pathSpan.textContent = rule;
+    li.appendChild(pathSpan);
+
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.className = "btn btn-secondary";
+    upBtn.textContent = "↑";
+    upBtn.disabled = index === 0;
+    upBtn.addEventListener("click", () => moveKeepRule(index, index - 1));
+    li.appendChild(upBtn);
+
+    const downBtn = document.createElement("button");
+    downBtn.type = "button";
+    downBtn.className = "btn btn-secondary";
+    downBtn.textContent = "↓";
+    downBtn.disabled = index === state.dedupe.keepRules.length - 1;
+    downBtn.addEventListener("click", () => moveKeepRule(index, index + 1));
+    li.appendChild(downBtn);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "btn btn-secondary";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => removeKeepRule(index));
+    li.appendChild(removeBtn);
+
+    list.appendChild(li);
+  });
+}
+
+async function addKeepRule(rulePath) {
+  if (state.dedupe.keepRules.includes(rulePath)) return;
+  state.dedupe.keepRules.unshift(rulePath); // new rules default to top priority
+  state.dedupe.overrides = {}; // a rule change supersedes manual per-group overrides
+  await refreshKeptSelection();
+  renderKeepRules();
+  renderDedupeGroups();
+}
+
+async function moveKeepRule(from, to) {
+  const rules = state.dedupe.keepRules;
+  const [moved] = rules.splice(from, 1);
+  rules.splice(to, 0, moved);
+  await refreshKeptSelection();
+  renderKeepRules();
+  renderDedupeGroups();
+}
+
+async function removeKeepRule(index) {
+  state.dedupe.keepRules.splice(index, 1);
+  await refreshKeptSelection();
+  renderKeepRules();
+  renderDedupeGroups();
+}
+
+/** The rel_path currently kept for a group: a manual override, else the server's resolution. */
+function keptPathFor(digest) {
+  return state.dedupe.overrides[digest] ?? state.dedupe.kept[digest];
+}
+
+function renderDedupeGroups() {
+  const container = document.getElementById("dedupe-groups");
+  container.innerHTML = "";
+
+  for (const group of state.dedupe.groups) {
+    const groupEl = document.createElement("div");
+    groupEl.className = "duplicate-group";
+
+    const header = document.createElement("div");
+    header.className = "duplicate-group-header";
+    header.innerHTML = `<span>${group.members.length} copies, ${formatBytes(group.size)} each</span><span>${formatBytes(group.wasted_bytes)} reclaimable</span>`;
+    groupEl.appendChild(header);
+
+    const keptPath = keptPathFor(group.digest);
+
+    for (const member of group.members) {
+      const row = document.createElement("div");
+      row.className = "duplicate-group-member";
+
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = `keep-${group.digest}`;
+      radio.checked = member.rel_path === keptPath;
+      radio.addEventListener("change", () => {
+        state.dedupe.overrides[group.digest] = member.rel_path;
+        renderDedupeGroups();
+        renderSelectionSummary();
+      });
+      row.appendChild(radio);
+
+      const pathSpan = document.createElement("span");
+      pathSpan.className = "member-path";
+      pathSpan.textContent = member.rel_path;
+      row.appendChild(pathSpan);
+
+      const keepFolderBtn = document.createElement("button");
+      keepFolderBtn.type = "button";
+      keepFolderBtn.className = "btn btn-secondary";
+      keepFolderBtn.textContent = "Keep everything in this folder";
+      const parentDir = member.rel_path.includes("/")
+        ? member.rel_path.slice(0, member.rel_path.lastIndexOf("/"))
+        : "";
+      keepFolderBtn.disabled = parentDir === "";
+      keepFolderBtn.addEventListener("click", () => addKeepRule(parentDir));
+      row.appendChild(keepFolderBtn);
+
+      groupEl.appendChild(row);
+    }
+
+    container.appendChild(groupEl);
+  }
+
+  renderDedupeEmptyGroup();
+  renderSelectionSummary();
+}
+
+function renderDedupeEmptyGroup() {
+  const panel = document.getElementById("dedupe-empty-group-panel");
+  const list = document.getElementById("dedupe-empty-group-list");
+  const group = state.dedupe.emptyGroup;
+
+  panel.hidden = group === null;
+  if (group === null) return;
+
+  list.innerHTML = "";
+  for (const member of group.members) {
+    const li = document.createElement("li");
+    li.textContent = member.rel_path;
+    list.appendChild(li);
+  }
+}
+
+/** Every member not currently kept, across all real groups (the empty group is excluded — D5). */
+function computeDedupeSelection() {
+  const selected = [];
+  for (const group of state.dedupe.groups) {
+    const keptPath = keptPathFor(group.digest);
+    for (const member of group.members) {
+      if (member.rel_path !== keptPath) selected.push(member.id);
+    }
+  }
+  return selected;
+}
+
+function renderSelectionSummary() {
+  const selected = computeDedupeSelection();
+  const bytes = selected.reduce((sum, id) => {
+    for (const group of state.dedupe.groups) {
+      const member = group.members.find((m) => m.id === id);
+      if (member) return sum + member.size;
+    }
+    return sum;
+  }, 0);
+  document.getElementById("dedupe-selection-summary").textContent =
+    `${selected.length} file(s) to quarantine, ${formatBytes(bytes)}`;
 }
