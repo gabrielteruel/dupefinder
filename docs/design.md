@@ -111,7 +111,10 @@ classification already identifies duplicates within a single tree.
 into `DuplicateGroup`s and resolves, via an ordered list of folder-priority rules, which member
 of each group to keep. The tie-break order is (matching rule index, path depth, rel_path
 lexicographic) — always total and deterministic, so the same input always yields the same
-output; this matters because the resolution is recorded in the audit report.
+output. This matters because `POST /api/dedupe/apply` records the `keep_rules` list itself (not
+a separately-serialized resolution) in the JSON audit report via `_execute_apply`'s
+`extra_report_fields` — since `resolve()` is deterministic, that one field is enough to
+reconstruct *why* every file in the run was kept or quarantined after the fact.
 
 Zero-byte files are grouped and shown, but excluded from automatic resolution: every zero-byte
 file shares one digest by construction, so auto-selecting would target every placeholder file

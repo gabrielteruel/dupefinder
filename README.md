@@ -54,35 +54,45 @@ external requests.
 
 ## Walkthrough
 
-1. **Choose folders.** Folder A (scanned for files to move), Folder B (compared against, never
-   modified), and a Destination. Type a path or use the built-in folder browser.
-2. **Review folders to skip.** dupefinder flags directories that are usually noise — `.git`,
+1. **Choose a tool.** Compare two folders, or find duplicates inside a single folder — pick one
+   before anything else. Each option explains what it does; you can switch back later without
+   losing what you've typed.
+2. **Choose folders.** Folder A (scanned for files to move), Folder B (compared against, never
+   modified), and a Destination. Type a path or use the built-in folder browser. (Dedupe mode
+   asks for Folder A and a quarantine folder only — there's no Folder B to compare against.)
+3. **Review folders to skip.** dupefinder flags directories that are usually noise — `.git`,
    `node_modules`, caches, `$RECYCLE.BIN`, hidden folders — and lets you choose per directory:
    compare it, skip it, or (Folder A only) move it aside to a trash folder.
-3. **Review and select.** A sortable, filterable table of every file in A that isn't in B.
-   Files that duplicate *other files within A* are shown too, but only one representative per
-   duplicate group is pre-selected, so you don't move five copies of the same thing.
-4. **Done.** A summary of what moved, plus a JSON audit report of the entire run.
+4. **Review and select.** A sortable, filterable table of every file in A that isn't in B (or,
+   in dedupe mode, the duplicate groups to resolve — see below). Files that duplicate *other
+   files within A* are shown too, but only one representative per duplicate group is
+   pre-selected, so you don't move five copies of the same thing.
+5. **Done.** A summary of what moved, plus a JSON audit report of the entire run.
+
+A step indicator at the top of the page always shows where you are in this sequence.
 
 ## Dedupe mode
 
 Sometimes there's no second folder to compare against — you just have one messy folder with
 copies of the same file scattered across it: a photo library re-imported twice, a project
-directory with old `backup/` subfolders nobody cleaned up. "Find duplicates in one folder"
-switches dupefinder to that mode: pick a single folder and it groups files by content,
+directory with old `backup/` subfolders nobody cleaned up. Pick "Find duplicates" on the first
+screen to switch dupefinder to that mode: it scans a single folder and groups files by content,
 wherever they landed inside it.
 
 For each group of identical files, dupefinder needs to know which copy to *keep* — the rest go
-to quarantine. Add folder-priority rules (`fotos/originales` before `fotos/whatsapp`, for
-example) and, for every group, the copy in the highest-priority matching folder wins; if none
-of the rules apply, the copy closest to the folder's root wins. Groups made entirely of
-zero-byte files are shown but never auto-resolved, since every empty file has the same
-"content" and there's nothing meaningful to prefer.
+to quarantine. Click "Keep everything in this folder" next to any copy to add its folder as a
+priority rule (e.g. `fotos/originales`); for every group, the copy in the highest-priority
+matching folder wins, and rules can be reordered or removed afterward. If no rule applies to a
+group, the copy closest to the folder's root wins. Groups made entirely of zero-byte files are
+shown but never auto-resolved, since every empty file has the same "content" and there's nothing
+meaningful to prefer.
 
 Nothing moves until you press "Move duplicates to quarantine" — the same read-first, review,
 then-act flow as comparing two folders, the same collision handling, and the same JSON audit
-report. dupefinder will not let a selection empty an entire group of every one of its copies;
-at least one always survives.
+report, which also records the keep-priority rules used so every decision can be reconstructed
+later. dupefinder will not let a selection empty an entire group of files with real content;
+at least one copy always survives (an all-zero-byte group, like a stray set of `.gitkeep`
+files, is shown read-only and can't be selected at all).
 
 ## Safety
 

@@ -11,6 +11,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Dedupe mode: scan a single folder recursively for internal duplicates, choose which copy to
   keep via ordered folder-priority rules, and move the rest to a quarantine folder. Reuses the
   existing comparison pipeline, job infrastructure and persistent cache unchanged.
+- Dedupe mode's audit report records the keep-priority rules used for the run, so which copy
+  was kept and why is reconstructable after the fact, the same way compare mode's report is.
+- Mode selection ("Compare two folders" vs. "Find duplicates") is now its own first screen
+  instead of a radio choice buried in the folder form, and a 5-step progress indicator (Mode →
+  Folders → Scan → Review → Done) stays visible across the whole flow.
 
 ## [0.4.0] - 2026-08-04
 
