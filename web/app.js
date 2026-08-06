@@ -111,6 +111,34 @@ async function api(path, method, body) {
   return data;
 }
 
+const STEP_ORDER = ["screen-mode", "screen-select", "screen-prescan", "screen-report", "screen-result"];
+
+/** screen-dedupe-report is the dedupe-mode equivalent of screen-report -- same stepper slot. */
+function stepIndexForScreen(id) {
+  const normalized = id === "screen-dedupe-report" ? "screen-report" : id;
+  return STEP_ORDER.indexOf(normalized);
+}
+
+function updateStepper(id) {
+  const currentIndex = stepIndexForScreen(id);
+
+  document.querySelectorAll("#stepper .stepper-step").forEach((step, index) => {
+    const circle = step.querySelector(".stepper-circle");
+    step.classList.remove("done", "current", "upcoming");
+    if (index < currentIndex) {
+      step.classList.add("done");
+      circle.textContent = "✓";
+    } else {
+      circle.textContent = String(index + 1);
+      step.classList.add(index === currentIndex ? "current" : "upcoming");
+    }
+  });
+
+  document.querySelectorAll("#stepper .stepper-connector").forEach((connector, index) => {
+    connector.classList.toggle("done", index < currentIndex);
+  });
+}
+
 function showScreen(id) {
   document.querySelectorAll(".screen").forEach((el) => el.classList.remove("active"));
   document.getElementById(id).classList.add("active");
@@ -118,6 +146,8 @@ function showScreen(id) {
   // The path summary is redundant with the inputs on screen 1, so it only
   // shows on the screens that follow folder selection.
   document.getElementById("path-summary").hidden = id === "screen-mode" || id === "screen-select";
+
+  updateStepper(id);
 }
 
 function updatePathSummary() {
@@ -290,6 +320,7 @@ document.getElementById("btn-clear-cache").addEventListener("click", () => {
 
 loadSettings();
 loadCacheStats();
+updateStepper("screen-mode");
 
 // ---------------------------------------------------------------------
 // Folder browse modal

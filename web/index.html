@@ -14,6 +14,33 @@
 
   <main class="app-main">
 
+    <ol id="stepper" class="stepper">
+      <li class="stepper-step" data-step="screen-mode">
+        <span class="stepper-circle">1</span>
+        <span class="stepper-label">Mode</span>
+      </li>
+      <li class="stepper-connector"></li>
+      <li class="stepper-step" data-step="screen-select">
+        <span class="stepper-circle">2</span>
+        <span class="stepper-label">Folders</span>
+      </li>
+      <li class="stepper-connector"></li>
+      <li class="stepper-step" data-step="screen-prescan">
+        <span class="stepper-circle">3</span>
+        <span class="stepper-label">Scan</span>
+      </li>
+      <li class="stepper-connector"></li>
+      <li class="stepper-step" data-step="screen-report">
+        <span class="stepper-circle">4</span>
+        <span class="stepper-label">Review</span>
+      </li>
+      <li class="stepper-connector"></li>
+      <li class="stepper-step" data-step="screen-result">
+        <span class="stepper-circle">5</span>
+        <span class="stepper-label">Done</span>
+      </li>
+    </ol>
+
     <!-- Shows the chosen A/B/destination paths on every screen after selection -->
     <div id="path-summary" class="path-summary" hidden>
       <div class="path-summary-item">
