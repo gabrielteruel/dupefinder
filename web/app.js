@@ -236,6 +236,7 @@ document.getElementById("btn-continue-mode").addEventListener("click", () => {
 });
 
 document.getElementById("btn-change-mode").addEventListener("click", () => {
+  if (state.busy) return;
   showScreen("screen-mode");
 });
 
