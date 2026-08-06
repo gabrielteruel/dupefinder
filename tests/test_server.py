@@ -519,6 +519,66 @@ class DedupeResolveTests(JobsTestCase):
         self.assertEqual(status, 404)
 
 
+class DedupeApplyTests(JobsTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        build_tree(self.root, {
+            "folder/a/x.png": b"same-content",
+            "folder/b/x.png": b"same-content",
+            "folder/c/x.png": b"same-content",
+        })
+        self.folder = os.path.join(self.root, "folder")
+        self.dest = os.path.join(self.root, "dest")
+
+        rows = [
+            ReportRow(id="a/x.png", abs_path=os.path.join(self.folder, "a", "x.png"),
+                      rel_path="a/x.png", size=12, status="internal_copy", sha256="h1"),
+            ReportRow(id="b/x.png", abs_path=os.path.join(self.folder, "b", "x.png"),
+                      rel_path="b/x.png", size=12, status="internal_copy", sha256="h1"),
+            ReportRow(id="c/x.png", abs_path=os.path.join(self.folder, "c", "x.png"),
+                      rel_path="c/x.png", size=12, status="exclusive", sha256="h1"),
+        ]
+        JOBS["j"] = Job(id="j", mode="dedupe", status="done", config={"folder": self.folder},
+                         report=Report(rows=rows, errors=[], stats=Stats()))
+
+    def test_moves_the_selected_members_and_leaves_a_survivor(self) -> None:
+        status, payload = handle_dedupe_apply(
+            {"job_id": "j", "dest": self.dest, "selected": ["a/x.png", "b/x.png"]}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["moved"]), 2)
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "c", "x.png")))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "a", "x.png")))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "b", "x.png")))
+
+    def test_selecting_every_member_of_a_group_is_rejected_and_nothing_moves(self) -> None:
+        status, payload = handle_dedupe_apply(
+            {"job_id": "j", "dest": self.dest, "selected": ["a/x.png", "b/x.png", "c/x.png"]}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "a", "x.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "b", "x.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.folder, "c", "x.png")))
+
+    def test_rejects_dest_inside_the_scanned_folder(self) -> None:
+        status, payload = handle_dedupe_apply(
+            {"job_id": "j", "dest": os.path.join(self.folder, "dest"), "selected": ["a/x.png"]}
+        )
+
+        self.assertEqual(status, 400)
+
+    def test_unknown_file_id_in_selection_is_rejected(self) -> None:
+        status, payload = handle_dedupe_apply(
+            {"job_id": "j", "dest": self.dest, "selected": ["nonexistent.png"]}
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+
 class ProgressEtaTests(JobsTestCase):
     def test_eta_is_null_during_walk_phases(self) -> None:
         JOBS["j"] = Job(id="j", phase="scanning_a", bytes_to_resolve=1000)

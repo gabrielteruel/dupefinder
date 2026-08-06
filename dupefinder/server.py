@@ -24,6 +24,7 @@ from dupefinder.models import NoisyDir, Report
 from dupefinder.mover import (
     apply_moves,
     move_to_trash,
+    validate_dedupe_paths,
     validate_paths,
     validate_sources,
     write_report,
@@ -522,6 +523,55 @@ def handle_dedupe_resolve(body: dict) -> tuple[int, dict]:
     return 200, {"kept": kept}
 
 
+def _execute_apply(job: Job, dest: str, entries: list[tuple[str, str]]) -> tuple[int, dict]:
+    """Shared move-and-audit mechanics for both handle_apply and handle_dedupe_apply.
+
+    By the time this runs, `entries` is already a concrete list of
+    (abs_path, rel_path) to move -- compare mode's "what I'm keeping" and
+    dedupe mode's "what I'm discarding" are unambiguous by this point, so
+    there is no mode-specific decision left to make here, only mechanical
+    execution: create the destination, move the files, sweep any trash
+    directories, write the audit report.
+
+    Caller must already hold job.applying == True (claimed under JOBS_LOCK)
+    before calling this; this always clears job.applying in its finally.
+    """
+    try:
+        os.makedirs(dest, exist_ok=True)
+
+        cache = HashCache()
+        move_result = apply_moves(entries, dest, cache)
+
+        for noisy_dir in job.trash_dirs:
+            try:
+                move_result.trashed.extend(move_to_trash([noisy_dir], dest))
+            except (OSError, ValueError) as exc:
+                move_result.errors.append({"path": noisy_dir.abs_path, "error": str(exc)})
+
+        payload = {
+            "config": job.config,
+            "stats": asdict(job.report.stats),
+            "moved": move_result.moved,
+            "skipped_identical": move_result.skipped_identical,
+            "renamed": move_result.renamed,
+            "trashed": move_result.trashed,
+            "errors": move_result.errors,
+        }
+        report_path = write_report(dest, payload)
+        job.applied = True
+    finally:
+        job.applying = False
+
+    return 200, {
+        "moved": move_result.moved,
+        "skipped_identical": move_result.skipped_identical,
+        "renamed": move_result.renamed,
+        "trashed": move_result.trashed,
+        "errors": move_result.errors,
+        "report_path": report_path,
+    }
+
+
 def handle_apply(body: dict) -> tuple[int, dict]:
     job_id = body.get("job_id", "")
     dest = body.get("dest", "")
@@ -570,46 +620,14 @@ def handle_apply(body: dict) -> tuple[int, dict]:
             return 409, {"error": "these files are already being moved; wait for it to finish"}
         job.applying = True
 
-    try:
-        os.makedirs(dest, exist_ok=True)
-
-        cache = HashCache()
-        move_result = apply_moves(entries, dest, cache)
-
-        # One directory at a time, so a single failure (a folder locked by
-        # Windows, say) is reported without discarding the ones that succeeded.
-        for noisy_dir in job.trash_dirs:
-            try:
-                move_result.trashed.extend(move_to_trash([noisy_dir], dest))
-            except (OSError, ValueError) as exc:
-                move_result.errors.append({"path": noisy_dir.abs_path, "error": str(exc)})
-
-        payload = {
-            "config": job.config,
-            "stats": asdict(job.report.stats),
-            "moved": move_result.moved,
-            "skipped_identical": move_result.skipped_identical,
-            "renamed": move_result.renamed,
-            "trashed": move_result.trashed,
-            "errors": move_result.errors,
-        }
-        report_path = write_report(dest, payload)
-        job.applied = True
-    finally:
-        job.applying = False
-
-    return 200, {
-        "moved": move_result.moved,
-        "skipped_identical": move_result.skipped_identical,
-        "renamed": move_result.renamed,
-        "trashed": move_result.trashed,
-        "errors": move_result.errors,
-        "report_path": report_path,
-    }
+    return _execute_apply(job, dest, entries)
 
 
 def handle_dedupe_apply(body: dict) -> tuple[int, dict]:
     job_id = body.get("job_id", "")
+    dest = body.get("dest", "")
+    selected = set(body.get("selected") or [])
+
     job = JOBS.get(job_id)
     if job is None:
         return 404, {"error": f"unknown job: {job_id}"}
@@ -617,7 +635,44 @@ def handle_dedupe_apply(body: dict) -> tuple[int, dict]:
         return 409, {"error": f"job {job_id} is not a dedupe-mode job"}
     if job.status != "done":
         return 409, {"error": f"job is not finished yet (status={job.status})"}
-    return 501, {"error": "not implemented yet"}
+
+    folder = job.config.get("folder", "")
+
+    try:
+        validate_dedupe_paths(folder, dest)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+
+    dest = os.path.realpath(dest)
+
+    rows_by_id = {row.id: row for row in job.report.rows}
+    for row_id in selected:
+        if row_id not in rows_by_id:
+            return 400, {"error": f"unknown file id in selection: {row_id}"}
+
+    # The survivor rail: recompute groups from the job's own report -- never
+    # trust the client's selection alone -- and refuse a selection that would
+    # empty any group of every member.
+    groups, _empty_group = group_duplicates(job.report.rows)
+    for group in groups:
+        member_ids = {m.id for m in group.members}
+        if member_ids <= selected:
+            return 400, {
+                "error": f"selection would remove every copy of a duplicate "
+                         f"(digest {group.digest[:8]}); at least one must remain"
+            }
+
+    with JOBS_LOCK:
+        if job.applied:
+            return 409, {
+                "error": "this scan has already been applied; run a new scan to move more files"
+            }
+        if job.applying:
+            return 409, {"error": "these files are already being moved; wait for it to finish"}
+        job.applying = True
+
+    entries = [(rows_by_id[row_id].abs_path, rows_by_id[row_id].rel_path) for row_id in selected]
+    return _execute_apply(job, dest, entries)
 
 
 DEFAULT_SETTINGS = {"last_paths": None, "io_workers": 1, "use_cache": True}
@@ -668,6 +723,7 @@ POST_ROUTES = {
     "/api/scan": handle_scan,
     "/api/dedupe/scan": handle_dedupe_scan,
     "/api/dedupe/resolve": handle_dedupe_resolve,
+    "/api/dedupe/apply": handle_dedupe_apply,
     "/api/apply": handle_apply,
     "/api/settings": handle_settings_post,
     "/api/volumes": handle_volumes,
